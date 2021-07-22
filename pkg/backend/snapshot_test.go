@@ -20,12 +20,15 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
-	"github.com/pulumi/pulumi/pkg/resource"
-	"github.com/pulumi/pulumi/pkg/resource/deploy"
-	"github.com/pulumi/pulumi/pkg/secrets"
-	"github.com/pulumi/pulumi/pkg/secrets/b64"
-	"github.com/pulumi/pulumi/pkg/tokens"
-	"github.com/pulumi/pulumi/pkg/version"
+	"github.com/pulumi/pulumi/pkg/v3/resource/deploy"
+	"github.com/pulumi/pulumi/pkg/v3/resource/stack"
+	"github.com/pulumi/pulumi/pkg/v3/secrets"
+	"github.com/pulumi/pulumi/pkg/v3/secrets/b64"
+	"github.com/pulumi/pulumi/pkg/v3/version"
+	"github.com/pulumi/pulumi/sdk/v3/go/common/resource"
+	"github.com/pulumi/pulumi/sdk/v3/go/common/resource/config"
+	"github.com/pulumi/pulumi/sdk/v3/go/common/resource/plugin"
+	"github.com/pulumi/pulumi/sdk/v3/go/common/tokens"
 )
 
 type MockRegisterResourceEvent struct {
@@ -62,7 +65,7 @@ func MockSetup(t *testing.T, baseSnap *deploy.Snapshot) (*SnapshotManager, *Mock
 	return NewSnapshotManager(sp, baseSnap), sp
 }
 
-func NewResource(name string, deps ...resource.URN) *resource.State {
+func NewResourceWithDeps(name string, deps []resource.URN) *resource.State {
 	return &resource.State{
 		Type:         tokens.Type("test"),
 		URN:          resource.URN(name),
@@ -70,6 +73,20 @@ func NewResource(name string, deps ...resource.URN) *resource.State {
 		Outputs:      make(resource.PropertyMap),
 		Dependencies: deps,
 	}
+}
+
+func NewResourceWithInputs(name string, inputs resource.PropertyMap) *resource.State {
+	return &resource.State{
+		Type:         tokens.Type("test"),
+		URN:          resource.URN(name),
+		Inputs:       inputs,
+		Outputs:      make(resource.PropertyMap),
+		Dependencies: []resource.URN{},
+	}
+}
+
+func NewResource(name string, deps ...resource.URN) *resource.State {
+	return NewResourceWithDeps(name, deps)
 }
 
 func NewSnapshot(resources []*resource.State) *deploy.Snapshot {
@@ -113,6 +130,48 @@ func TestIdenticalSames(t *testing.T) {
 	// Our same resource should be the first entry in the snapshot list.
 	inSnapshot := sp.SavedSnapshots[0].Resources[0]
 	assert.Equal(t, sameState.URN, inSnapshot.URN)
+}
+
+func TestSamesWithEmptyDependencies(t *testing.T) {
+	res := NewResourceWithDeps("a-unique-urn-resource-a", nil)
+	snap := NewSnapshot([]*resource.State{
+		res,
+	})
+	manager, sp := MockSetup(t, snap)
+	resUpdated := NewResourceWithDeps(string(res.URN), []resource.URN{})
+	same := deploy.NewSameStep(nil, nil, res, resUpdated)
+	mutation, err := manager.BeginMutation(same)
+	assert.NoError(t, err)
+	err = mutation.End(same, true)
+	assert.NoError(t, err)
+	assert.Len(t, sp.SavedSnapshots, 0, "expected no snapshots to be saved for same step")
+}
+
+func TestSamesWithEmptyArraysInInputs(t *testing.T) {
+	// Model reading from state file
+	state := map[string]interface{}{"defaults": []interface{}{}}
+	inputs, err := stack.DeserializeProperties(state, config.NopDecrypter, config.NopEncrypter)
+	assert.NoError(t, err)
+
+	res := NewResourceWithInputs("a-unique-urn-resource-a", inputs)
+	snap := NewSnapshot([]*resource.State{
+		res,
+	})
+	manager, sp := MockSetup(t, snap)
+
+	// Model passing into and back out of RPC layer (e.g. via `Check`)
+	marshalledInputs, err := plugin.MarshalProperties(inputs, plugin.MarshalOptions{})
+	assert.NoError(t, err)
+	inputsUpdated, err := plugin.UnmarshalProperties(marshalledInputs, plugin.MarshalOptions{})
+	assert.NoError(t, err)
+
+	resUpdated := NewResourceWithInputs(string(res.URN), inputsUpdated)
+	same := deploy.NewSameStep(nil, nil, res, resUpdated)
+	mutation, err := manager.BeginMutation(same)
+	assert.NoError(t, err)
+	err = mutation.End(same, true)
+	assert.NoError(t, err)
+	assert.Len(t, sp.SavedSnapshots, 0, "expected no snapshots to be saved for same step")
 }
 
 // This test challenges the naive approach of mutating resources

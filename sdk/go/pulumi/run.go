@@ -15,44 +15,62 @@
 package pulumi
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strconv"
 
-	"github.com/hashicorp/go-multierror"
-	"github.com/pkg/errors"
-	"golang.org/x/net/context"
+	multierror "github.com/hashicorp/go-multierror"
 
-	"github.com/pulumi/pulumi/pkg/util/contract"
+	"github.com/pulumi/pulumi/sdk/v3/go/common/util/contract"
+
+	"google.golang.org/grpc"
 )
+
+var ErrPlugins = errors.New("pulumi: plugins requested")
+
+// A RunOption is used to control the behavior of Run and RunErr.
+type RunOption func(*RunInfo)
 
 // Run executes the body of a Pulumi program, granting it access to a deployment context that it may use
 // to register resources and orchestrate deployment activities.  This connects back to the Pulumi engine using gRPC.
 // If the program fails, the process will be terminated and the function will not return.
-func Run(body RunFunc) {
-	if err := RunErr(body); err != nil {
-		fmt.Fprintf(os.Stderr, "error: program failed: %v\n", err)
-		os.Exit(1)
+func Run(body RunFunc, opts ...RunOption) {
+	if err := RunErr(body, opts...); err != nil {
+		if err != ErrPlugins {
+			fmt.Fprintf(os.Stderr, "error: program failed: %v\n", err)
+			os.Exit(1)
+		}
+
+		printRequiredPlugins()
+		os.Exit(0)
 	}
 }
 
 // RunErr executes the body of a Pulumi program, granting it access to a deployment context that it may use
 // to register resources and orchestrate deployment activities.  This connects back to the Pulumi engine using gRPC.
-func RunErr(body RunFunc) error {
+func RunErr(body RunFunc, opts ...RunOption) error {
 	// Parse the info out of environment variables.  This is a lame contract with the caller, but helps to keep
 	// boilerplate to a minimum in the average Pulumi Go program.
-	// TODO(joe): this is a fine default, but consider `...RunOpt`s to control how we get the various addresses, etc.
 	info := getEnvInfo()
+	if info.getPlugins {
+		return ErrPlugins
+	}
+
+	for _, o := range opts {
+		o(&info)
+	}
 
 	// Validate some properties.
 	if info.Project == "" {
-		return errors.Errorf("missing project name")
+		return errors.New("missing project name")
 	} else if info.Stack == "" {
 		return errors.New("missing stack name")
-	} else if info.MonitorAddr == "" {
+	} else if info.MonitorAddr == "" && info.Mocks == nil {
 		return errors.New("missing resource monitor RPC address")
-	} else if info.EngineAddr == "" {
+	} else if info.EngineAddr == "" && info.Mocks == nil {
 		return errors.New("missing engine RPC address")
 	}
 
@@ -72,16 +90,13 @@ func RunWithContext(ctx *Context, body RunFunc) error {
 	info := ctx.info
 
 	// Create a root stack resource that we'll parent everything to.
-	reg, err := ctx.RegisterResource(
-		"pulumi:pulumi:Stack", fmt.Sprintf("%s-%s", info.Project, info.Stack), false, nil)
+	var stack ResourceState
+	err := ctx.RegisterResource(
+		"pulumi:pulumi:Stack", fmt.Sprintf("%s-%s", info.Project, info.Stack), nil, &stack)
 	if err != nil {
 		return err
 	}
-	ctx.stackR, err = reg.URN().Value()
-	if err != nil {
-		return err
-	}
-	contract.Assertf(ctx.stackR != "", "expected root stack resource to have a non-empty URN")
+	ctx.stack = &stack
 
 	// Execute the body.
 	var result error
@@ -90,12 +105,13 @@ func RunWithContext(ctx *Context, body RunFunc) error {
 	}
 
 	// Register all the outputs to the stack object.
-	if err = ctx.RegisterResourceOutputs(ctx.stackR, ctx.exports); err != nil {
+	if err = ctx.RegisterResourceOutputs(ctx.stack, Map(ctx.exports)); err != nil {
 		result = multierror.Append(result, err)
 	}
 
-	// Ensure all outstanding RPCs have completed before proceeding.  Also, prevent any new RPCs from happening.
-	ctx.waitForRPCs()
+	if err = ctx.wait(); err != nil {
+		return err
+	}
 
 	// Propagate the error from the body, if any.
 	return result
@@ -107,13 +123,17 @@ type RunFunc func(ctx *Context) error
 
 // RunInfo contains all the metadata about a run request.
 type RunInfo struct {
-	Project     string
-	Stack       string
-	Config      map[string]string
-	Parallel    int
-	DryRun      bool
-	MonitorAddr string
-	EngineAddr  string
+	Project          string
+	Stack            string
+	Config           map[string]string
+	ConfigSecretKeys []string
+	Parallel         int
+	DryRun           bool
+	MonitorAddr      string
+	EngineAddr       string
+	Mocks            MockResourceMonitor
+	getPlugins       bool
+	engineConn       *grpc.ClientConn // Pre-existing engine connection. If set this is used over EngineAddr.
 }
 
 // getEnvInfo reads various program information from the process environment.
@@ -121,20 +141,28 @@ func getEnvInfo() RunInfo {
 	// Most of the variables are just strings, and we can read them directly.  A few of them require more parsing.
 	parallel, _ := strconv.Atoi(os.Getenv(EnvParallel))
 	dryRun, _ := strconv.ParseBool(os.Getenv(EnvDryRun))
+	getPlugins, _ := strconv.ParseBool(os.Getenv(envPlugins))
 
 	var config map[string]string
 	if cfg := os.Getenv(EnvConfig); cfg != "" {
 		_ = json.Unmarshal([]byte(cfg), &config)
 	}
 
+	var configSecretKeys []string
+	if keys := os.Getenv(EnvConfigSecretKeys); keys != "" {
+		_ = json.Unmarshal([]byte(keys), &configSecretKeys)
+	}
+
 	return RunInfo{
-		Project:     os.Getenv(EnvProject),
-		Stack:       os.Getenv(EnvStack),
-		Config:      config,
-		Parallel:    parallel,
-		DryRun:      dryRun,
-		MonitorAddr: os.Getenv(EnvMonitor),
-		EngineAddr:  os.Getenv(EnvEngine),
+		Project:          os.Getenv(EnvProject),
+		Stack:            os.Getenv(EnvStack),
+		Config:           config,
+		ConfigSecretKeys: configSecretKeys,
+		Parallel:         parallel,
+		DryRun:           dryRun,
+		MonitorAddr:      os.Getenv(EnvMonitor),
+		EngineAddr:       os.Getenv(EnvEngine),
+		getPlugins:       getPlugins,
 	}
 }
 
@@ -145,6 +173,9 @@ const (
 	EnvStack = "PULUMI_STACK"
 	// EnvConfig is the envvar used to read the current Pulumi configuration variables.
 	EnvConfig = "PULUMI_CONFIG"
+	// EnvConfigSecretKeys is the envvar used to read the current Pulumi configuration keys that are secrets.
+	//nolint: gosec
+	EnvConfigSecretKeys = "PULUMI_CONFIG_SECRET_KEYS"
 	// EnvParallel is the envvar used to read the current Pulumi degree of parallelism.
 	EnvParallel = "PULUMI_PARALLEL"
 	// EnvDryRun is the envvar used to read the current Pulumi dry-run setting.
@@ -153,4 +184,28 @@ const (
 	EnvMonitor = "PULUMI_MONITOR"
 	// EnvEngine is the envvar used to read the current Pulumi engine RPC address.
 	EnvEngine = "PULUMI_ENGINE"
+	// envPlugins is the envvar used to request that the Pulumi program print its set of required plugins and exit.
+	envPlugins = "PULUMI_PLUGINS"
 )
+
+type PackageInfo struct {
+	Name    string `json:"name"`
+	Version string `json:"version,omitempty"`
+	Server  string `json:"server,omitempty"`
+}
+
+var packageRegistry = map[PackageInfo]struct{}{}
+
+func RegisterPackage(info PackageInfo) {
+	packageRegistry[info] = struct{}{}
+}
+
+func printRequiredPlugins() {
+	plugins := []PackageInfo{}
+	for info := range packageRegistry {
+		plugins = append(plugins, info)
+	}
+
+	err := json.NewEncoder(os.Stdout).Encode(map[string]interface{}{"plugins": plugins})
+	contract.IgnoreError(err)
+}

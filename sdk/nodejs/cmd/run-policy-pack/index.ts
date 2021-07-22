@@ -33,7 +33,7 @@ let programRunning = false;
 const uncaughtHandler = (err: Error) => {
     uncaughtErrors.add(err);
     if (!programRunning) {
-        console.error(err.stack || err.message);
+        console.error(err.stack || err.message || ("" + err));
     }
 };
 
@@ -47,6 +47,8 @@ const uncaughtHandler = (err: Error) => {
 const nodeJSProcessExitedAfterLoggingUserActionableMessage = 32;
 
 process.on("uncaughtException", uncaughtHandler);
+// @ts-ignore 'unhandledRejection' will almost always invoke uncaughtHandler with an Error. so just
+// suppress the TS strictness here.
 process.on("unhandledRejection", uncaughtHandler);
 process.on("exit", (code: number) => {
     // If there were any uncaught errors at all, we always want to exit with an error code. If we
@@ -93,7 +95,7 @@ function main(args: string[]): void {
     const argv: minimist.ParsedArgs = minimist(args, {});
 
     // Finally, ensure we have a program to run.
-    if (argv._.length !== 2) {
+    if (argv._.length < 2) {
         return printErrorUsageAndExit("error: Usage: RUN <engine-address> <program>");
     }
 

@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from asyncio import ensure_future
-from typing import Optional, Any, List
+from typing import Optional, Any, List, Callable
 from copy import deepcopy
 
 from .output import Output, Input
@@ -35,7 +35,7 @@ class StackReference(CustomResource):
     The outputs of the referenced stack.
     """
 
-    secret_outputs: Output[List[str]]
+    secret_output_names: Output[List[str]]
     """
     The names of any stack outputs which contain secrets.
     """
@@ -52,13 +52,12 @@ class StackReference(CustomResource):
         """
 
         target_stack = stack_name if stack_name is not None else name
-        opts = deepcopy(opts) if opts is not None else ResourceOptions()
-        opts.id = target_stack
+        opts = ResourceOptions.merge(opts, ResourceOptions(id=target_stack))
 
         super().__init__("pulumi:pulumi:StackReference", name, {
             "name": target_stack,
             "outputs": None,
-            "secret_outputs": None,
+            "secret_output_names": None,
         }, opts)
 
     def get_output(self, name: Input[str]) -> Output[Any]:
@@ -67,7 +66,7 @@ class StackReference(CustomResource):
 
         :param Input[str] name: The name of the stack output to fetch.
         """
-        value = Output.all(Output.from_input(name), self.outputs).apply(lambda l: l[1].get(l[0]))
+        value: Output[Any] = Output.all(Output.from_input(name), self.outputs).apply(lambda l: l[1].get(l[0])) # type: ignore
         is_secret = ensure_future(self.__is_secret_name(name))
 
         return Output(value.resources(), value.future(), value.is_known(), is_secret)
@@ -80,7 +79,7 @@ class StackReference(CustomResource):
         :param Input[str] name: The name of the stack output to fetch.
         """
 
-        value = Output.all(Output.from_input(name), self.outputs).apply(lambda l: l[1][l[0]])
+        value = Output.all(Output.from_input(name), self.outputs).apply(lambda l: l[1][l[0]]) # type: ignore
         is_secret = ensure_future(self.__is_secret_name(name))
 
         return Output(value.resources(), value.future(), value.is_known(), is_secret)
@@ -95,19 +94,19 @@ class StackReference(CustomResource):
         :rtype: str
         """
 
-        return "secret_outputs" if prop == "secretOutputs" else prop
+        return "secret_output_names" if prop == "secretOutputNames" else prop
 
     async def __is_secret_name(self, name: Input[str]) -> bool:
         # If either the name or set of secret outputs is unknown, we can't do anything smart, so we
         # just copy the secretness from the entire outputs value.
-        if not (await Output.from_input(name).is_known() and await self.secret_outputs.is_known()):
+        if not (await Output.from_input(name).is_known() and await self.secret_output_names.is_known()):
             return await self.outputs.is_secret()
 
         # Otherwise, if we have a list of outputs we know are secret, we can use that list to
         # determine if this output should be secret. Names could be None here in cases where we are
         # using an older CLI that did not return this information (in this case we again fallback to
         # the secretness of outputs value).
-        names = await (self.secret_outputs.future())
+        names = await (self.secret_output_names.future())
         if names is None:
             return await self.outputs.is_secret()
 

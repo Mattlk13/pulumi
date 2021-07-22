@@ -15,135 +15,131 @@
 package config
 
 import (
-	"github.com/pkg/errors"
+	"encoding/json"
+	"fmt"
+
 	"github.com/spf13/cast"
 
-	"github.com/pulumi/pulumi/sdk/go/pulumi"
+	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
 )
 
-// Try loads a configuration value by its key, returning a non-nil error if it doesn't exist.
-func Try(ctx *pulumi.Context, key string) (string, error) {
-	v, ok := ctx.GetConfig(key)
+func try(ctx *pulumi.Context, key, use, insteadOf string) (string, error) {
+	v, ok := get(ctx, key, use, insteadOf)
 	if !ok {
 		return "",
-			errors.Errorf("missing required configuration variable '%s'; run `pulumi config` to set", key)
+			fmt.Errorf("missing required configuration variable '%s'; run `pulumi config` to set", key)
 	}
 	return v, nil
 }
 
-// TryBool loads an optional configuration value by its key, as a bool, or returns an error if it doesn't exist.
-func TryBool(ctx *pulumi.Context, key string) (bool, error) {
-	v, err := Try(ctx, key)
+// Try loads a configuration value by its key, returning a non-nil error if it doesn't exist.
+func Try(ctx *pulumi.Context, key string) (string, error) {
+	return try(ctx, key, "TrySecret", "Try")
+}
+
+func tryObject(ctx *pulumi.Context, key string, output interface{}, use, insteadOf string) error {
+	v, err := try(ctx, key, use, insteadOf)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal([]byte(v), output)
+}
+
+// TryObject loads an optional configuration value by its key into the output variable,
+// or returns an error if unable to do so.
+func TryObject(ctx *pulumi.Context, key string, output interface{}) error {
+	return tryObject(ctx, key, output, "TrySecretObject", "TryObject")
+}
+
+func tryBool(ctx *pulumi.Context, key, use, insteadOf string) (bool, error) {
+	v, err := try(ctx, key, use, insteadOf)
 	if err != nil {
 		return false, err
 	}
 	return cast.ToBool(v), nil
 }
 
-// TryFloat32 loads an optional configuration value by its key, as a float32, or returns an error if it doesn't exist.
-func TryFloat32(ctx *pulumi.Context, key string) (float32, error) {
-	v, err := Try(ctx, key)
-	if err != nil {
-		return 0, err
-	}
-	return cast.ToFloat32(v), nil
+// TryBool loads an optional configuration value by its key, as a bool, or returns an error if it doesn't exist.
+func TryBool(ctx *pulumi.Context, key string) (bool, error) {
+	return tryBool(ctx, key, "TrySecretBool", "TryBool")
 }
 
-// TryFloat64 loads an optional configuration value by its key, as a float64, or returns an error if it doesn't exist.
-func TryFloat64(ctx *pulumi.Context, key string) (float64, error) {
-	v, err := Try(ctx, key)
+func tryFloat64(ctx *pulumi.Context, key, use, insteadOf string) (float64, error) {
+	v, err := try(ctx, key, use, insteadOf)
 	if err != nil {
 		return 0, err
 	}
 	return cast.ToFloat64(v), nil
 }
 
-// TryInt loads an optional configuration value by its key, as a int, or returns an error if it doesn't exist.
-func TryInt(ctx *pulumi.Context, key string) (int, error) {
-	v, err := Try(ctx, key)
+// TryFloat64 loads an optional configuration value by its key, as a float64, or returns an error if it doesn't exist.
+func TryFloat64(ctx *pulumi.Context, key string) (float64, error) {
+	return tryFloat64(ctx, key, "TrySecretFloat64", "TryFloat64")
+}
+
+func tryInt(ctx *pulumi.Context, key, use, insteadOf string) (int, error) {
+	v, err := try(ctx, key, use, insteadOf)
 	if err != nil {
 		return 0, err
 	}
 	return cast.ToInt(v), nil
 }
 
-// TryInt8 loads an optional configuration value by its key, as a int8, or returns an error if it doesn't exist.
-func TryInt8(ctx *pulumi.Context, key string) (int8, error) {
-	v, err := Try(ctx, key)
-	if err != nil {
-		return 0, err
-	}
-	return cast.ToInt8(v), nil
+// TryInt loads an optional configuration value by its key, as a int, or returns an error if it doesn't exist.
+func TryInt(ctx *pulumi.Context, key string) (int, error) {
+	return tryInt(ctx, key, "TrySecretInt", "TryInt")
 }
 
-// TryInt16 loads an optional configuration value by its key, as a int16, or returns an error if it doesn't exist.
-func TryInt16(ctx *pulumi.Context, key string) (int16, error) {
-	v, err := Try(ctx, key)
+// TrySecret loads a configuration value by its key, returning a non-nil error if it doesn't exist.
+func TrySecret(ctx *pulumi.Context, key string) (pulumi.StringOutput, error) {
+	v, err := try(ctx, key, "", "")
 	if err != nil {
-		return 0, err
+		var empty pulumi.StringOutput
+		return empty, err
 	}
-	return cast.ToInt16(v), nil
+	return pulumi.ToSecret(pulumi.String(v)).(pulumi.StringOutput), nil
 }
 
-// TryInt32 loads an optional configuration value by its key, as a int32, or returns an error if it doesn't exist.
-func TryInt32(ctx *pulumi.Context, key string) (int32, error) {
-	v, err := Try(ctx, key)
+// TrySecretObject loads a configuration value by its key into the output variable,
+// or returns an error if unable to do so.
+func TrySecretObject(ctx *pulumi.Context, key string, output interface{}) (pulumi.Output, error) {
+	err := tryObject(ctx, key, output, "", "")
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
-	return cast.ToInt32(v), nil
+
+	return pulumi.ToSecret(output), nil
 }
 
-// TryInt64 loads an optional configuration value by its key, as a int64, or returns an error if it doesn't exist.
-func TryInt64(ctx *pulumi.Context, key string) (int64, error) {
-	v, err := Try(ctx, key)
+// TrySecretBool loads an optional configuration value by its key, as a bool,
+// or returns an error if it doesn't exist.
+func TrySecretBool(ctx *pulumi.Context, key string) (pulumi.BoolOutput, error) {
+	v, err := tryBool(ctx, key, "", "")
 	if err != nil {
-		return 0, err
+		var empty pulumi.BoolOutput
+		return empty, err
 	}
-	return cast.ToInt64(v), nil
+	return pulumi.ToSecret(pulumi.Bool(v)).(pulumi.BoolOutput), nil
 }
 
-// TryUint loads an optional configuration value by its key, as a uint, or returns an error if it doesn't exist.
-func TryUint(ctx *pulumi.Context, key string) (uint, error) {
-	v, err := Try(ctx, key)
+// TrySecretFloat64 loads an optional configuration value by its key, as a float64,
+// or returns an error if it doesn't exist.
+func TrySecretFloat64(ctx *pulumi.Context, key string) (pulumi.Float64Output, error) {
+	v, err := tryFloat64(ctx, key, "", "")
 	if err != nil {
-		return 0, err
+		var empty pulumi.Float64Output
+		return empty, err
 	}
-	return cast.ToUint(v), nil
+	return pulumi.ToSecret(pulumi.Float64(v)).(pulumi.Float64Output), nil
 }
 
-// TryUint8 loads an optional configuration value by its key, as a uint8, or returns an error if it doesn't exist.
-func TryUint8(ctx *pulumi.Context, key string) (uint8, error) {
-	v, err := Try(ctx, key)
+// TrySecretInt loads an optional configuration value by its key, as a int,
+// or returns an error if it doesn't exist.
+func TrySecretInt(ctx *pulumi.Context, key string) (pulumi.IntOutput, error) {
+	v, err := tryInt(ctx, key, "", "")
 	if err != nil {
-		return 0, err
+		var empty pulumi.IntOutput
+		return empty, err
 	}
-	return cast.ToUint8(v), nil
-}
-
-// TryUint16 loads an optional configuration value by its key, as a uint16, or returns an error if it doesn't exist.
-func TryUint16(ctx *pulumi.Context, key string) (uint16, error) {
-	v, err := Try(ctx, key)
-	if err != nil {
-		return 0, err
-	}
-	return cast.ToUint16(v), nil
-}
-
-// TryUint32 loads an optional configuration value by its key, as a uint32, or returns an error if it doesn't exist.
-func TryUint32(ctx *pulumi.Context, key string) (uint32, error) {
-	v, err := Try(ctx, key)
-	if err != nil {
-		return 0, err
-	}
-	return cast.ToUint32(v), nil
-}
-
-// TryUint64 loads an optional configuration value by its key, as a uint64, or returns an error if it doesn't exist.
-func TryUint64(ctx *pulumi.Context, key string) (uint64, error) {
-	v, err := Try(ctx, key)
-	if err != nil {
-		return 0, err
-	}
-	return cast.ToUint64(v), nil
+	return pulumi.ToSecret(pulumi.Int(v)).(pulumi.IntOutput), nil
 }

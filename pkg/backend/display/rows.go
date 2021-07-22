@@ -22,13 +22,12 @@ import (
 	"strings"
 
 	"github.com/dustin/go-humanize/english"
-	"github.com/pulumi/pulumi/pkg/apitype"
-	"github.com/pulumi/pulumi/pkg/diag"
-	"github.com/pulumi/pulumi/pkg/diag/colors"
-	"github.com/pulumi/pulumi/pkg/engine"
-	"github.com/pulumi/pulumi/pkg/resource"
-	"github.com/pulumi/pulumi/pkg/resource/deploy"
-	"github.com/pulumi/pulumi/pkg/util/contract"
+	"github.com/pulumi/pulumi/pkg/v3/engine"
+	"github.com/pulumi/pulumi/pkg/v3/resource/deploy"
+	"github.com/pulumi/pulumi/sdk/v3/go/common/apitype"
+	"github.com/pulumi/pulumi/sdk/v3/go/common/diag"
+	"github.com/pulumi/pulumi/sdk/v3/go/common/diag/colors"
+	"github.com/pulumi/pulumi/sdk/v3/go/common/resource"
 )
 
 type Row interface {
@@ -58,6 +57,8 @@ type ResourceRow interface {
 	SetFailed()
 
 	DiagInfo() *DiagInfo
+	PolicyPayloads() []engine.PolicyViolationEventPayload
+
 	RecordDiagEvent(diagEvent engine.Event)
 	RecordPolicyViolationEvent(diagEvent engine.Event)
 }
@@ -86,12 +87,8 @@ func (data *headerRowData) SetDisplayOrderIndex(time int) {
 
 func (data *headerRowData) ColorizedColumns() []string {
 	if len(data.columns) == 0 {
-		blue := func(msg string) string {
-			return colors.Underline + colors.BrightBlue + msg + colors.Reset
-		}
-
 		header := func(msg string) string {
-			return blue(msg)
+			return columnHeader(msg)
 		}
 
 		var statusColumn string
@@ -110,7 +107,7 @@ func (data *headerRowData) ColorizedSuffix() string {
 	return ""
 }
 
-// Implementation of a row used for all the resource rows in the grid.
+// resourceRowData is the implementation of a row used for all the resource rows in the grid.
 type resourceRowData struct {
 	displayOrderIndex int
 
@@ -120,9 +117,6 @@ type resourceRowData struct {
 	step        engine.StepEventMetadata
 	outputSteps []engine.StepEventMetadata
 
-	// True if we should diff outputs instead of inputs for this row.
-	diffOutputs bool
-
 	// The tick we were on when we created this row.  Purely used for generating an
 	// ellipses to show progress for in-flight resources.
 	tick int
@@ -130,7 +124,8 @@ type resourceRowData struct {
 	// If we failed this operation for any reason.
 	failed bool
 
-	diagInfo *DiagInfo
+	diagInfo       *DiagInfo
+	policyPayloads []engine.PolicyViolationEventPayload
 
 	// If this row should be hidden by default.  We will hide unless we have any child nodes
 	// we need to show.
@@ -163,9 +158,6 @@ func (data *resourceRowData) Step() engine.StepEventMetadata {
 
 func (data *resourceRowData) SetStep(step engine.StepEventMetadata) {
 	data.step = step
-	if step.Op == deploy.OpRefresh {
-		data.diffOutputs = true
-	}
 }
 
 func (data *resourceRowData) AddOutputStep(step engine.StepEventMetadata) {
@@ -189,7 +181,7 @@ func (data *resourceRowData) DiagInfo() *DiagInfo {
 }
 
 func (data *resourceRowData) RecordDiagEvent(event engine.Event) {
-	payload := event.Payload.(engine.DiagEventPayload)
+	payload := event.Payload().(engine.DiagEventPayload)
 	data.recordDiagEventPayload(payload)
 }
 
@@ -225,31 +217,15 @@ func (data *resourceRowData) recordDiagEventPayload(payload engine.DiagEventPayl
 	}
 }
 
+// PolicyInfo returns the PolicyInfo object associated with the resourceRowData.
+func (data *resourceRowData) PolicyPayloads() []engine.PolicyViolationEventPayload {
+	return data.policyPayloads
+}
+
+// RecordPolicyViolationEvent records a policy event with the resourceRowData.
 func (data *resourceRowData) RecordPolicyViolationEvent(event engine.Event) {
-
-	//
-	// NOTE: The display code only understands DiagEvents. We convert the policy violation events
-	// accordingly so they can be displayed.
-	//
-
-	pePayload := event.Payload.(engine.PolicyViolationEventPayload)
-
-	payload := engine.DiagEventPayload{
-		URN:     pePayload.ResourceURN,
-		Prefix:  pePayload.Prefix,
-		Message: pePayload.Message,
-		Color:   pePayload.Color}
-
-	switch pePayload.EnforcementLevel {
-	case apitype.Mandatory:
-		payload.Severity = diag.Error
-	case apitype.Advisory:
-		payload.Severity = diag.Warning
-	default:
-		contract.Failf("Unknown enforcement level %q", pePayload.EnforcementLevel)
-	}
-
-	data.recordDiagEventPayload(payload)
+	pePayload := event.Payload().(engine.PolicyViolationEventPayload)
+	data.policyPayloads = append(data.policyPayloads, pePayload)
 }
 
 type column int
@@ -367,7 +343,7 @@ func (data *resourceRowData) getInfoColumn() string {
 		diagMsg += msg
 	}
 
-	changes := data.getDiffInfo(step)
+	changes := getDiffInfo(step, data.display.action)
 	if colors.Never.Colorize(changes) != "" {
 		appendDiagMessage("[" + changes + "]")
 	}
@@ -422,13 +398,14 @@ func (data *resourceRowData) getInfoColumn() string {
 	return diagMsg
 }
 
-func (data *resourceRowData) getDiffInfo(step engine.StepEventMetadata) string {
+func getDiffInfo(step engine.StepEventMetadata, action apitype.UpdateKind) string {
+	diffOutputs := action == apitype.RefreshUpdate
 	changesBuf := &bytes.Buffer{}
 	if step.Old != nil && step.New != nil {
 		var diff *resource.ObjectDiff
 		if step.DetailedDiff != nil {
 			diff = translateDetailedDiff(step)
-		} else if data.diffOutputs {
+		} else if diffOutputs {
 			if step.Old.Outputs != nil && step.New.Outputs != nil {
 				diff = step.Old.Outputs.Diff(step.New.Outputs)
 			}

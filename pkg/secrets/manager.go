@@ -11,10 +11,14 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+
+// Package secrets defines the interface common to all secret managers.
 package secrets
 
 import (
-	"github.com/pulumi/pulumi/pkg/resource/config"
+	"encoding/json"
+
+	"github.com/pulumi/pulumi/sdk/v3/go/common/resource/config"
 )
 
 // Manager provides the interface for providing stack encryption.
@@ -32,4 +36,25 @@ type Manager interface {
 	// Decrypter returns a `config.Decrypter` that can be used to decrypt values when deserializing a snapshot from a
 	// deployment, or an error if one can not be constructed.
 	Decrypter() (config.Decrypter, error)
+}
+
+// AreCompatible returns true if the two Managers are of the same type and have the same state.
+func AreCompatible(a, b Manager) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+
+	if a.Type() != b.Type() {
+		return false
+	}
+
+	as, err := json.Marshal(a.State())
+	if err != nil {
+		return false
+	}
+	bs, err := json.Marshal(b.State())
+	if err != nil {
+		return false
+	}
+	return string(as) == string(bs)
 }

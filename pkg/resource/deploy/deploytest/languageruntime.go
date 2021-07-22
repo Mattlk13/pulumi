@@ -15,12 +15,11 @@
 package deploytest
 
 import (
-	"github.com/pkg/errors"
-	"google.golang.org/grpc"
+	"context"
 
-	"github.com/pulumi/pulumi/pkg/resource/plugin"
-	"github.com/pulumi/pulumi/pkg/workspace"
-	pulumirpc "github.com/pulumi/pulumi/sdk/proto/go"
+	"github.com/pulumi/pulumi/sdk/v3/go/common/resource/plugin"
+	"github.com/pulumi/pulumi/sdk/v3/go/common/util/contract"
+	"github.com/pulumi/pulumi/sdk/v3/go/common/workspace"
 )
 
 type ProgramFunc func(runInfo plugin.RunInfo, monitor *ResourceMonitor) error
@@ -46,19 +45,16 @@ func (p *languageRuntime) GetRequiredPlugins(info plugin.ProgInfo) ([]workspace.
 }
 
 func (p *languageRuntime) Run(info plugin.RunInfo) (string, bool, error) {
-	// Connect to the resource monitor and create an appropriate client.
-	conn, err := grpc.Dial(info.MonitorAddress, grpc.WithInsecure())
+	monitor, err := dialMonitor(context.Background(), info.MonitorAddress)
 	if err != nil {
-		return "", false, errors.Wrapf(err, "could not connect to resource monitor")
+		return "", false, err
 	}
-
-	// Fire up a resource monitor client
-	resmon := pulumirpc.NewResourceMonitorClient(conn)
+	defer contract.IgnoreClose(monitor)
 
 	// Run the program.
 	done := make(chan error)
 	go func() {
-		done <- p.program(info, &ResourceMonitor{resmon: resmon})
+		done <- p.program(info, monitor)
 	}()
 	if progerr := <-done; progerr != nil {
 		return progerr.Error(), false, nil

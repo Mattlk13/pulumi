@@ -22,9 +22,10 @@ import (
 	"fmt"
 	"io"
 	"strconv"
+	"strings"
 
-	"github.com/pulumi/pulumi/pkg/graph"
-	"github.com/pulumi/pulumi/pkg/util/contract"
+	"github.com/pulumi/pulumi/pkg/v3/graph"
+	"github.com/pulumi/pulumi/sdk/v3/go/common/util/contract"
 )
 
 // Print prints a resource graph.
@@ -99,8 +100,15 @@ func Print(g graph.Graph, w io.Writer) error {
 					return err
 				}
 
+				var attrs []string
 				if out.Color() != "" {
-					if _, err := b.WriteString(fmt.Sprintf(" [color=\"%s\"]", out.Color())); err != nil {
+					attrs = append(attrs, fmt.Sprintf("color = \"%s\"", out.Color()))
+				}
+				if out.Label() != "" {
+					attrs = append(attrs, fmt.Sprintf("label = \"%s\"", out.Label()))
+				}
+				if len(attrs) > 0 {
+					if _, err := b.WriteString(fmt.Sprintf(" [%s]", strings.Join(attrs, ", "))); err != nil {
 						return err
 					}
 				}

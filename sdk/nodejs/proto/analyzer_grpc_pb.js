@@ -16,7 +16,7 @@
 // limitations under the License.
 //
 'use strict';
-var grpc = require('grpc');
+var grpc = require('@grpc/grpc-js');
 var analyzer_pb = require('./analyzer_pb.js');
 var plugin_pb = require('./plugin_pb.js');
 var google_protobuf_empty_pb = require('google-protobuf/google/protobuf/empty_pb.js');
@@ -55,6 +55,17 @@ function deserialize_pulumirpc_AnalyzeResponse(buffer_arg) {
   return analyzer_pb.AnalyzeResponse.deserializeBinary(new Uint8Array(buffer_arg));
 }
 
+function serialize_pulumirpc_AnalyzeStackRequest(arg) {
+  if (!(arg instanceof analyzer_pb.AnalyzeStackRequest)) {
+    throw new Error('Expected argument of type pulumirpc.AnalyzeStackRequest');
+  }
+  return Buffer.from(arg.serializeBinary());
+}
+
+function deserialize_pulumirpc_AnalyzeStackRequest(buffer_arg) {
+  return analyzer_pb.AnalyzeStackRequest.deserializeBinary(new Uint8Array(buffer_arg));
+}
+
 function serialize_pulumirpc_AnalyzerInfo(arg) {
   if (!(arg instanceof analyzer_pb.AnalyzerInfo)) {
     throw new Error('Expected argument of type pulumirpc.AnalyzerInfo');
@@ -64,6 +75,17 @@ function serialize_pulumirpc_AnalyzerInfo(arg) {
 
 function deserialize_pulumirpc_AnalyzerInfo(buffer_arg) {
   return analyzer_pb.AnalyzerInfo.deserializeBinary(new Uint8Array(buffer_arg));
+}
+
+function serialize_pulumirpc_ConfigureAnalyzerRequest(arg) {
+  if (!(arg instanceof analyzer_pb.ConfigureAnalyzerRequest)) {
+    throw new Error('Expected argument of type pulumirpc.ConfigureAnalyzerRequest');
+  }
+  return Buffer.from(arg.serializeBinary());
+}
+
+function deserialize_pulumirpc_ConfigureAnalyzerRequest(buffer_arg) {
+  return analyzer_pb.ConfigureAnalyzerRequest.deserializeBinary(new Uint8Array(buffer_arg));
 }
 
 function serialize_pulumirpc_PluginInfo(arg) {
@@ -84,7 +106,8 @@ function deserialize_pulumirpc_PluginInfo(buffer_arg) {
 // issues -- style, policy, correctness, security, and so on.
 var AnalyzerService = exports.AnalyzerService = {
   // Analyze analyzes a single resource object, and returns any errors that it finds.
-  analyze: {
+// Called with the "inputs" to the resource, before it is updated.
+analyze: {
     path: '/pulumirpc.Analyzer/Analyze',
     requestStream: false,
     responseStream: false,
@@ -95,8 +118,22 @@ var AnalyzerService = exports.AnalyzerService = {
     responseSerialize: serialize_pulumirpc_AnalyzeResponse,
     responseDeserialize: deserialize_pulumirpc_AnalyzeResponse,
   },
+  // AnalyzeStack analyzes all resources within a stack, at the end of a successful
+// preview or update. The provided resources are the "outputs", after any mutations
+// have taken place.
+analyzeStack: {
+    path: '/pulumirpc.Analyzer/AnalyzeStack',
+    requestStream: false,
+    responseStream: false,
+    requestType: analyzer_pb.AnalyzeStackRequest,
+    responseType: analyzer_pb.AnalyzeResponse,
+    requestSerialize: serialize_pulumirpc_AnalyzeStackRequest,
+    requestDeserialize: deserialize_pulumirpc_AnalyzeStackRequest,
+    responseSerialize: serialize_pulumirpc_AnalyzeResponse,
+    responseDeserialize: deserialize_pulumirpc_AnalyzeResponse,
+  },
   // GetAnalyzerInfo returns metadata about the analyzer (e.g., list of policies contained).
-  getAnalyzerInfo: {
+getAnalyzerInfo: {
     path: '/pulumirpc.Analyzer/GetAnalyzerInfo',
     requestStream: false,
     responseStream: false,
@@ -108,7 +145,7 @@ var AnalyzerService = exports.AnalyzerService = {
     responseDeserialize: deserialize_pulumirpc_AnalyzerInfo,
   },
   // GetPluginInfo returns generic information about this plugin, like its version.
-  getPluginInfo: {
+getPluginInfo: {
     path: '/pulumirpc.Analyzer/GetPluginInfo',
     requestStream: false,
     responseStream: false,
@@ -118,6 +155,18 @@ var AnalyzerService = exports.AnalyzerService = {
     requestDeserialize: deserialize_google_protobuf_Empty,
     responseSerialize: serialize_pulumirpc_PluginInfo,
     responseDeserialize: deserialize_pulumirpc_PluginInfo,
+  },
+  // Configure configures the analyzer, passing configuration properties for each policy.
+configure: {
+    path: '/pulumirpc.Analyzer/Configure',
+    requestStream: false,
+    responseStream: false,
+    requestType: analyzer_pb.ConfigureAnalyzerRequest,
+    responseType: google_protobuf_empty_pb.Empty,
+    requestSerialize: serialize_pulumirpc_ConfigureAnalyzerRequest,
+    requestDeserialize: deserialize_pulumirpc_ConfigureAnalyzerRequest,
+    responseSerialize: serialize_google_protobuf_Empty,
+    responseDeserialize: deserialize_google_protobuf_Empty,
   },
 };
 

@@ -21,10 +21,10 @@ import (
 	"github.com/pkg/errors"
 	"google.golang.org/grpc"
 
-	"github.com/pulumi/pulumi/pkg/util/cmdutil"
-	"github.com/pulumi/pulumi/pkg/util/logging"
-	"github.com/pulumi/pulumi/pkg/util/rpcutil"
-	pulumirpc "github.com/pulumi/pulumi/sdk/proto/go"
+	"github.com/pulumi/pulumi/sdk/v3/go/common/util/cmdutil"
+	"github.com/pulumi/pulumi/sdk/v3/go/common/util/logging"
+	"github.com/pulumi/pulumi/sdk/v3/go/common/util/rpcutil"
+	pulumirpc "github.com/pulumi/pulumi/sdk/v3/proto/go"
 )
 
 // Tracing is the optional command line flag passed to this provider for configuring a  Zipkin-compatible tracing
@@ -61,7 +61,7 @@ func Main(name string, provMaker func(*HostClient) (pulumirpc.ResourceProviderSe
 			pulumirpc.RegisterResourceProviderServer(srv, prov)
 			return nil
 		},
-	})
+	}, nil)
 	if err != nil {
 		return errors.Errorf("fatal: %v", err)
 	}

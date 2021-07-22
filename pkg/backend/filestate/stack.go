@@ -18,14 +18,14 @@ import (
 	"context"
 	"time"
 
-	"github.com/pulumi/pulumi/pkg/tokens"
+	"github.com/pulumi/pulumi/sdk/v3/go/common/tokens"
 
-	"github.com/pulumi/pulumi/pkg/apitype"
-	"github.com/pulumi/pulumi/pkg/backend"
-	"github.com/pulumi/pulumi/pkg/engine"
-	"github.com/pulumi/pulumi/pkg/operations"
-	"github.com/pulumi/pulumi/pkg/resource/deploy"
-	"github.com/pulumi/pulumi/pkg/util/result"
+	"github.com/pulumi/pulumi/pkg/v3/backend"
+	"github.com/pulumi/pulumi/pkg/v3/engine"
+	"github.com/pulumi/pulumi/pkg/v3/operations"
+	"github.com/pulumi/pulumi/pkg/v3/resource/deploy"
+	"github.com/pulumi/pulumi/sdk/v3/go/common/apitype"
+	"github.com/pulumi/pulumi/sdk/v3/go/common/util/result"
 )
 
 // Stack is a local stack.  This simply adds some local-specific properties atop the standard backend stack interface.
@@ -56,15 +56,11 @@ func (s *localStack) Snapshot(ctx context.Context) (*deploy.Snapshot, error) { r
 func (s *localStack) Backend() backend.Backend                               { return s.b }
 func (s *localStack) Path() string                                           { return s.path }
 
-func (s *localStack) Query(ctx context.Context, op backend.UpdateOperation) result.Result {
-	return backend.Query(ctx, s, op)
-}
-
 func (s *localStack) Remove(ctx context.Context, force bool) (bool, error) {
 	return backend.RemoveStack(ctx, s, force)
 }
 
-func (s *localStack) Rename(ctx context.Context, newName tokens.QName) error {
+func (s *localStack) Rename(ctx context.Context, newName tokens.QName) (backend.StackReference, error) {
 	return backend.RenameStack(ctx, s, newName)
 }
 
@@ -76,12 +72,21 @@ func (s *localStack) Update(ctx context.Context, op backend.UpdateOperation) (en
 	return backend.UpdateStack(ctx, s, op)
 }
 
+func (s *localStack) Import(ctx context.Context, op backend.UpdateOperation,
+	imports []deploy.Import) (engine.ResourceChanges, result.Result) {
+	return backend.ImportStack(ctx, s, op, imports)
+}
+
 func (s *localStack) Refresh(ctx context.Context, op backend.UpdateOperation) (engine.ResourceChanges, result.Result) {
 	return backend.RefreshStack(ctx, s, op)
 }
 
 func (s *localStack) Destroy(ctx context.Context, op backend.UpdateOperation) (engine.ResourceChanges, result.Result) {
 	return backend.DestroyStack(ctx, s, op)
+}
+
+func (s *localStack) Watch(ctx context.Context, op backend.UpdateOperation, paths []string) result.Result {
+	return backend.WatchStack(ctx, s, op, paths)
 }
 
 func (s *localStack) GetLogs(ctx context.Context, cfg backend.StackConfiguration,

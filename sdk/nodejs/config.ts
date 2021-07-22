@@ -12,14 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-import * as util from "util";
 import { RunError } from "./errors";
+import * as log from "./log";
 import { getProject } from "./metadata";
 import { Output } from "./output";
-import { getConfig } from "./runtime";
+import { getConfig, isConfigSecret } from "./runtime";
 
 function makeSecret<T>(value: T): Output<T> {
-    return new Output([], Promise.resolve(value), Promise.resolve(true), Promise.resolve(true));
+    return new Output(
+        [], Promise.resolve(value),
+        /*isKnown:*/ Promise.resolve(true), /*isSecret:*/ Promise.resolve(true),
+        Promise.resolve([]));
 }
 
 /**
@@ -54,26 +57,36 @@ export class Config {
      * @param key The key to lookup.
      * @param opts An options bag to constrain legal values.
      */
-    public get<K extends string = string>(key: string, opts?: StringConfigOptions<K>): K | undefined {
-        const v: string | undefined = getConfig(this.fullKey(key));
+    private getImpl<K extends string = string>(key: string,
+                                               opts?: StringConfigOptions<K>,
+                                               use?: (...args: any[]) => any,
+                                               insteadOf?: (...args: any[]) => any): K | undefined {
+        const fullKey = this.fullKey(key);
+        const v: string | undefined = getConfig(fullKey);
         if (v === undefined) {
             return undefined;
         }
+        // TODO[pulumi/pulumi#7127]: Re-enable the warning.
+        // Temporarily disabling the new warning.
+        // if (use && insteadOf && isConfigSecret(fullKey)) {
+        //     log.warn(`Configuration '${fullKey}' value is a secret; ` +
+        //         `use \`${use.name}\` instead of \`${insteadOf.name}\``);
+        // }
         if (opts) {
             // SAFETY: if allowedValues != null, verifying v ∈ K[]
             if (opts.allowedValues !== undefined && opts.allowedValues.indexOf(v as any) === -1) {
-                throw new ConfigEnumError(this.fullKey(key), v, opts.allowedValues);
+                throw new ConfigEnumError(fullKey, v, opts.allowedValues);
             } else if (opts.minLength !== undefined && v.length < opts.minLength) {
-                throw new ConfigRangeError(this.fullKey(key), v, opts.minLength, undefined);
+                throw new ConfigRangeError(fullKey, v, opts.minLength, undefined);
             } else if (opts.maxLength !== undefined && v.length > opts.maxLength) {
-                throw new ConfigRangeError(this.fullKey(key), v, undefined, opts.maxLength);
+                throw new ConfigRangeError(fullKey, v, undefined, opts.maxLength);
             } else if (opts.pattern !== undefined) {
                 let pattern = opts.pattern;
                 if (typeof pattern === "string") {
                     pattern = new RegExp(pattern);
                 }
                 if (!pattern.test(v)) {
-                    throw new ConfigPatternError(this.fullKey(key), v, pattern);
+                    throw new ConfigPatternError(fullKey, v, pattern);
                 }
             }
         }
@@ -84,6 +97,16 @@ export class Config {
     }
 
     /**
+     * get loads an optional configuration value by its key, or undefined if it doesn't exist.
+     *
+     * @param key The key to lookup.
+     * @param opts An options bag to constrain legal values.
+     */
+    public get<K extends string = string>(key: string, opts?: StringConfigOptions<K>): K | undefined {
+        return this.getImpl(key, opts, this.getSecret, this.get);
+    }
+
+    /**
      * getSecret loads an optional configuration value by its key, marking it as a secret, or undefined if it
      * doesn't exist.
      *
@@ -91,7 +114,7 @@ export class Config {
      * @param opts An options bag to constrain legal values.
      */
     public getSecret<K extends string = string>(key: string, opts?: StringConfigOptions<K>): Output<K> | undefined {
-        const v = this.get(key, opts);
+        const v = this.getImpl(key, opts);
         if (v === undefined) {
             return undefined;
         }
@@ -99,14 +122,10 @@ export class Config {
         return makeSecret(v);
     }
 
-    /**
-     * getBoolean loads an optional configuration value, as a boolean, by its key, or undefined if it doesn't exist.
-     * If the configuration value isn't a legal boolean, this function will throw an error.
-     *
-     * @param key The key to lookup.
-     */
-    public getBoolean(key: string): boolean | undefined {
-        const v: string | undefined = this.get(key);
+    private getBooleanImpl(key: string,
+                           use?: (...args: any[]) => any,
+                           insteadOf?: (...args: any[]) => any): boolean | undefined {
+        const v: string | undefined = this.getImpl(key, undefined, use, insteadOf);
         if (v === undefined) {
             return undefined;
         } else if (v === "true") {
@@ -118,6 +137,16 @@ export class Config {
     }
 
     /**
+     * getBoolean loads an optional configuration value, as a boolean, by its key, or undefined if it doesn't exist.
+     * If the configuration value isn't a legal boolean, this function will throw an error.
+     *
+     * @param key The key to lookup.
+     */
+    public getBoolean(key: string): boolean | undefined {
+        return this.getBooleanImpl(key, this.getSecretBoolean, this.getBoolean);
+    }
+
+    /**
      * getSecretBoolean loads an optional configuration value, as a boolean, by its key, making it as a secret
      * or undefined if it doesn't exist. If the configuration value isn't a legal boolean, this function will
      * throw an error.
@@ -125,7 +154,7 @@ export class Config {
      * @param key The key to lookup.
      */
     public getSecretBoolean(key: string): Output<boolean> | undefined {
-        const v = this.getBoolean(key);
+        const v = this.getBooleanImpl(key);
         if (v === undefined) {
             return undefined;
         }
@@ -133,15 +162,11 @@ export class Config {
         return makeSecret(v);
     }
 
-    /**
-     * getNumber loads an optional configuration value, as a number, by its key, or undefined if it doesn't exist.
-     * If the configuration value isn't a legal number, this function will throw an error.
-     *
-     * @param key The key to lookup.
-     * @param opts An options bag to constrain legal values.
-     */
-    public getNumber(key: string, opts?: NumberConfigOptions): number | undefined {
-        const v: string | undefined = this.get(key);
+    private getNumberImpl(key: string,
+                          opts?: NumberConfigOptions,
+                          use?: (...args: any[]) => any,
+                          insteadOf?: (...args: any[]) => any): number | undefined {
+        const v: string | undefined = this.getImpl(key, undefined, use, insteadOf);
         if (v === undefined) {
             return undefined;
         }
@@ -160,6 +185,17 @@ export class Config {
     }
 
     /**
+     * getNumber loads an optional configuration value, as a number, by its key, or undefined if it doesn't exist.
+     * If the configuration value isn't a legal number, this function will throw an error.
+     *
+     * @param key The key to lookup.
+     * @param opts An options bag to constrain legal values.
+     */
+    public getNumber(key: string, opts?: NumberConfigOptions): number | undefined {
+        return this.getNumberImpl(key, opts, this.getSecretNumber, this.getNumber);
+    }
+
+    /**
      * getSecretNumber loads an optional configuration value, as a number, by its key, marking it as a secret
      * or undefined if it doesn't exist.
      * If the configuration value isn't a legal number, this function will throw an error.
@@ -168,7 +204,7 @@ export class Config {
      * @param opts An options bag to constrain legal values.
      */
     public getSecretNumber(key: string, opts?: NumberConfigOptions): Output<number> | undefined {
-        const v = this.getNumber(key, opts);
+        const v = this.getNumberImpl(key, opts);
         if (v === undefined) {
             return undefined;
         }
@@ -176,14 +212,10 @@ export class Config {
         return makeSecret(v);
     }
 
-    /**
-     * getObject loads an optional configuration value, as an object, by its key, or undefined if it doesn't exist.
-     * This routine simply JSON parses and doesn't validate the shape of the contents.
-     *
-     * @param key The key to lookup.
-     */
-    public getObject<T>(key: string): T | undefined {
-        const v: string | undefined = this.get(key);
+    private getObjectImpl<T>(key: string,
+                             use?: (...args: any[]) => any,
+                             insteadOf?: (...args: any[]) => any): T | undefined {
+        const v: string | undefined = this.getImpl(key, undefined, use, insteadOf);
         if (v === undefined) {
             return undefined;
         }
@@ -196,6 +228,16 @@ export class Config {
     }
 
     /**
+     * getObject loads an optional configuration value, as an object, by its key, or undefined if it doesn't exist.
+     * This routine simply JSON parses and doesn't validate the shape of the contents.
+     *
+     * @param key The key to lookup.
+     */
+    public getObject<T>(key: string): T | undefined {
+        return this.getObjectImpl<T>(key, this.getSecretObject, this.getObject);
+    }
+
+    /**
      * getSecretObject loads an optional configuration value, as an object, by its key, marking it as a secret
      * or undefined if it doesn't exist.
      * This routine simply JSON parses and doesn't validate the shape of the contents.
@@ -203,13 +245,24 @@ export class Config {
      * @param key The key to lookup.
      */
     public getSecretObject<T>(key: string): Output<T> | undefined {
-        const v = this.getObject<T>(key);
+        const v = this.getObjectImpl<T>(key);
 
         if (v === undefined) {
             return undefined;
         }
 
         return makeSecret<T>(v);
+    }
+
+    private requireImpl<K extends string = string>(key: string,
+                                                   opts?: StringConfigOptions<K>,
+                                                   use?: (...args: any[]) => any,
+                                                   insteadOf?: (...args: any[]) => any): K {
+        const v: K | undefined = this.getImpl(key, opts, use, insteadOf);
+        if (v === undefined) {
+            throw new ConfigMissingError(this.fullKey(key));
+        }
+        return v;
     }
 
     /**
@@ -219,22 +272,28 @@ export class Config {
      * @param opts An options bag to constrain legal values.
      */
     public require<K extends string = string>(key: string, opts?: StringConfigOptions<K>): K {
-        const v: K | undefined = this.get(key, opts);
-        if (v === undefined) {
-            throw new ConfigMissingError(this.fullKey(key));
-        }
-        return v;
+        return this.requireImpl(key, opts, this.requireSecret, this.require);
     }
 
     /**
-     * require loads a configuration value by its given key, marking it as a secet.  If it doesn't exist, an error
+     * require loads a configuration value by its given key, marking it as a secret.  If it doesn't exist, an error
      * is thrown.
      *
      * @param key The key to lookup.
      * @param opts An options bag to constrain legal values.
      */
     public requireSecret<K extends string = string>(key: string, opts?: StringConfigOptions<K>): Output<K> {
-        return makeSecret(this.require(key, opts));
+        return makeSecret(this.requireImpl(key, opts));
+    }
+
+    private requireBooleanImpl(key: string,
+                               use?: (...args: any[]) => any,
+                               insteadOf?: (...args: any[]) => any): boolean {
+        const v: boolean | undefined = this.getBooleanImpl(key, use, insteadOf);
+        if (v === undefined) {
+            throw new ConfigMissingError(this.fullKey(key));
+        }
+        return v;
     }
 
     /**
@@ -244,11 +303,7 @@ export class Config {
      * @param key The key to lookup.
      */
     public requireBoolean(key: string): boolean {
-        const v: boolean | undefined = this.getBoolean(key);
-        if (v === undefined) {
-            throw new ConfigMissingError(this.fullKey(key));
-        }
-        return v;
+        return this.requireBooleanImpl(key, this.requireSecretBoolean, this.requireBoolean);
     }
 
     /**
@@ -258,7 +313,18 @@ export class Config {
      * @param key The key to lookup.
      */
     public requireSecretBoolean(key: string): Output<boolean> {
-        return makeSecret(this.requireBoolean(key));
+        return makeSecret(this.requireBooleanImpl(key));
+    }
+
+    private requireNumberImpl(key: string,
+                              opts?: NumberConfigOptions,
+                              use?: (...args: any[]) => any,
+                              insteadOf?: (...args: any[]) => any): number {
+        const v: number | undefined = this.getNumberImpl(key, opts, use, insteadOf);
+        if (v === undefined) {
+            throw new ConfigMissingError(this.fullKey(key));
+        }
+        return v;
     }
 
     /**
@@ -269,11 +335,7 @@ export class Config {
      * @param opts An options bag to constrain legal values.
      */
     public requireNumber(key: string, opts?: NumberConfigOptions): number {
-        const v: number | undefined = this.getNumber(key, opts);
-        if (v === undefined) {
-            throw new ConfigMissingError(this.fullKey(key));
-        }
-        return v;
+        return this.requireNumberImpl(key, opts, this.requireSecretNumber, this.requireNumber);
     }
 
     /**
@@ -284,7 +346,15 @@ export class Config {
      * @param opts An options bag to constrain legal values.
      */
     public requireSecretNumber(key: string, opts?: NumberConfigOptions): Output<number> {
-        return makeSecret(this.requireNumber(key, opts));
+        return makeSecret(this.requireNumberImpl(key, opts));
+    }
+
+    private requireObjectImpl<T>(key: string, use?: (...args: any[]) => any, insteadOf?: (...args: any[]) => any): T {
+        const v: T | undefined = this.getObjectImpl<T>(key, use, insteadOf);
+        if (v === undefined) {
+            throw new ConfigMissingError(this.fullKey(key));
+        }
+        return v;
     }
 
     /**
@@ -294,11 +364,7 @@ export class Config {
      * @param key The key to lookup.
      */
     public requireObject<T>(key: string): T {
-        const v: T | undefined = this.getObject<T>(key);
-        if (v === undefined) {
-            throw new ConfigMissingError(this.fullKey(key));
-        }
-        return v;
+        return this.requireObjectImpl<T>(key, this.requireSecretObject, this.requireObject);
     }
 
     /**
@@ -309,7 +375,7 @@ export class Config {
      * @param key The key to lookup.
      */
     public requireSecretObject<T>(key: string): Output<T> {
-        return makeSecret(this.requireObject<T>(key));
+        return makeSecret(this.requireObjectImpl<T>(key));
     }
 
     /**
@@ -325,7 +391,7 @@ export class Config {
 /**
  * StringConfigOptions may be used to constrain the set of legal values a string config value may contain.
  */
-interface StringConfigOptions<K extends string = string> {
+export interface StringConfigOptions<K extends string = string> {
     /**
      * The legal enum values. If it does not match, a ConfigEnumError is thrown.
      */
@@ -347,7 +413,7 @@ interface StringConfigOptions<K extends string = string> {
 /**
  * NumberConfigOptions may be used to constrain the set of legal values a number config value may contain.
  */
-interface NumberConfigOptions {
+export interface NumberConfigOptions {
     /**
      * The minimum number value, inclusive. If the number is less than this, a ConfigRangeError is thrown.
      */

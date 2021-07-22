@@ -12,10 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-import { util } from "protobufjs";
-import { ResourceError, RunError } from "./errors";
-import { all, Input, Inputs, interpolate, Output, output } from "./output";
-import { readResource, registerResource, registerResourceOutputs } from "./runtime/resource";
+import { ResourceError } from "./errors";
+import { Input, Inputs, interpolate, Output, output } from "./output";
+import { getStackResource, unknownValue } from "./runtime";
+import { getResource, readResource, registerResource, registerResourceOutputs } from "./runtime/resource";
 import { getProject, getStack } from "./runtime/settings";
 import * as utils from "./utils";
 
@@ -73,21 +73,20 @@ function inheritedChildAlias(childName: string, parentName: string, parentAlias:
  */
 export abstract class Resource {
     /**
-     * @internal
      * A private field to help with RTTI that works in SxS scenarios.
+     * @internal
      */
     // tslint:disable-next-line:variable-name
     public readonly __pulumiResource: boolean = true;
 
     /**
-     * @internal
      * The optional parent of this resource.
+     * @internal
      */
     // tslint:disable-next-line:variable-name
     public readonly __parentResource: Resource | undefined;
 
     /**
-     * @internal
      * The child resources of this resource.  We use these (only from a ComponentResource) to allow
      * code to dependOn a ComponentResource and have that effectively mean that it is depending on
      * all the CustomResource children of that component.
@@ -123,6 +122,8 @@ export abstract class Resource {
      * However, this would be pretty nonsensical as there is zero need for a custom resource to ever
      * need to reference the urn of a component resource.  So it's acceptable if that sort of
      * pattern failed in practice.
+     *
+     * @internal
      */
     // tslint:disable-next-line:variable-name
     public __childResources: Set<Resource> | undefined;
@@ -131,43 +132,70 @@ export abstract class Resource {
      * urn is the stable logical URN used to distinctly address a resource, both before and after
      * deployments.
      */
-    public readonly urn: Output<URN>;
+    public readonly urn!: Output<URN>;
 
     /**
-     * @internal
      * When set to true, protect ensures this resource cannot be deleted.
+     * @internal
      */
     // tslint:disable-next-line:variable-name
     private readonly __protect: boolean;
 
     /**
+     * A collection of transformations to apply as part of resource registration.
+     *
+     * Note: This is marked optional only because older versions of this library may not have had
+     * this property, and marking optional forces consumers of the property to defensively handle
+     * cases where they are passed "old" resources.
      * @internal
+     */
+    // tslint:disable-next-line:variable-name
+    __transformations?: ResourceTransformation[];
+
+    /**
      * A list of aliases applied to this resource.
      *
      * Note: This is marked optional only because older versions of this library may not have had
-     * this property, and marking optional forces conumers of the property to defensively handle
+     * this property, and marking optional forces consumers of the property to defensively handle
      * cases where they are passed "old" resources.
+     * @internal
      */
     // tslint:disable-next-line:variable-name
     readonly __aliases?: Input<URN>[];
 
     /**
-     * @internal
      * The name assigned to the resource at construction.
      *
      * Note: This is marked optional only because older versions of this library may not have had
-     * this property, and marking optional forces conumers of the property to defensively handle
+     * this property, and marking optional forces consumers of the property to defensively handle
      * cases where they are passed "old" resources.
+     * @internal
      */
     // tslint:disable-next-line:variable-name
     private readonly __name?: string;
 
     /**
-     * @internal
      * The set of providers to use for child resources. Keyed by package name (e.g. "aws").
+     * @internal
      */
     // tslint:disable-next-line:variable-name
     private readonly __providers: Record<string, ProviderResource>;
+
+    /**
+     * The specified provider or provider determined from the parent for custom resources.
+     * @internal
+     */
+    // Note: This is deliberately not named `__provider` as that conflicts with the property
+    // used by the `dynamic.Resource` class.
+    // tslint:disable-next-line:variable-name
+    readonly __prov?: ProviderResource;
+
+    /**
+     * The specified provider version.
+     * @internal
+     */
+    // tslint:disable-next-line:variable-name
+    readonly __version?: string;
 
     public static isInstance(obj: any): obj is Resource {
         return utils.isInstance<Resource>(obj, "__pulumiResource");
@@ -195,8 +223,18 @@ export abstract class Resource {
      * @param custom True to indicate that this is a custom resource, managed by a plugin.
      * @param props The arguments to use to populate the new resource.
      * @param opts A bag of options that control this resource's behavior.
+     * @param remote True if this is a remote component resource.
+     * @param dependency True if this is a synthetic resource used internally for dependency tracking.
      */
-    constructor(t: string, name: string, custom: boolean, props: Inputs = {}, opts: ResourceOptions = {}) {
+    constructor(t: string, name: string, custom: boolean, props: Inputs = {}, opts: ResourceOptions = {},
+                remote: boolean = false, dependency: boolean = false) {
+
+        if (dependency) {
+            this.__protect = false;
+            this.__providers = {};
+            return;
+        }
+
         if (opts.parent && !Resource.isInstance(opts.parent)) {
             throw new Error(`Resource parent is not a valid Resource: ${opts.parent}`);
         }
@@ -206,6 +244,27 @@ export abstract class Resource {
         }
         if (!name) {
             throw new ResourceError("Missing resource name argument (for URN creation)", opts.parent);
+        }
+
+        // Before anything else - if there are transformations registered, invoke them in order to transform the properties and
+        // options assigned to this resource.
+        const parent = opts.parent || getStackResource() || { __transformations: undefined };
+        this.__transformations = [ ...(opts.transformations || []), ...(parent.__transformations || []) ];
+        for (const transformation of this.__transformations) {
+            const tres = transformation({ resource: this, type: t, name, props, opts });
+            if (tres) {
+                if (tres.opts.parent !== opts.parent) {
+                    // This is currently not allowed because the parent tree is needed to establish what
+                    // transformation to apply in the first place, and to compute inheritance of other
+                    // resource options in the Resource constructor before transformations are run (so
+                    // modifying it here would only even partially take affect).  It's theoretically
+                    // possible this restriction could be lifted in the future, but for now just
+                    // disallow re-parenting resources in transformations to be safe.
+                    throw new Error("Transformations cannot currently be used to change the `parent` of a resource.");
+                }
+                props = tres.props;
+                opts = tres.opts;
+            }
         }
 
         this.__name = name;
@@ -240,12 +299,12 @@ export abstract class Resource {
         }
 
         if (custom) {
-            const provider = (<CustomResourceOptions>opts).provider;
+            const provider = opts.provider;
             if (provider === undefined) {
                 if (opts.parent) {
                     // If no provider was given, but we have a parent, then inherit the
                     // provider from our parent.
-                    (<CustomResourceOptions>opts).provider = opts.parent.getProvider(t);
+                    opts.provider = opts.parent.getProvider(t);
                 }
             } else {
                 // If a provider was specified, add it to the providers map under this type's package so that
@@ -270,6 +329,8 @@ export abstract class Resource {
         }
 
         this.__protect = !!opts.protect;
+        this.__prov = custom ? opts.provider : undefined;
+        this.__version = opts.version;
 
         // Collapse any `Alias`es down to URNs. We have to wait until this point to do so because we do not know the
         // default `name` and `type` to apply until we are inside the resource constructor.
@@ -280,8 +341,12 @@ export abstract class Resource {
             }
         }
 
-        if (opts.id) {
-            // If this resource already exists, read its state rather than registering it anew.
+        if (opts.urn) {
+            // This is a resource that already exists. Read its state from the engine.
+            getResource(this, props, custom, opts.urn);
+        }
+        else if (opts.id) {
+            // If this is a custom resource that already exists, read its state from the provider.
             if (!custom) {
                 throw new ResourceError(
                     "Cannot read an existing resource unless it has a custom provider", opts.parent);
@@ -292,7 +357,7 @@ export abstract class Resource {
             // resource's properties will be resolved asynchronously after the operation completes, so
             // that dependent computations resolve normally.  If we are just planning, on the other
             // hand, values will never resolve.
-            registerResource(this, t, name, custom, props, opts);
+            registerResource(this, t, name, custom, remote, urn => new DependencyResource(urn), props, opts);
         }
     }
 }
@@ -445,6 +510,12 @@ export interface ResourceOptions {
      */
     ignoreChanges?: string[];
     /**
+     * Changes to any of these property paths will force a replacement.  If this list includes `"*"`, changes to any
+     * properties will force a replacement.  Initialization errors from previous deployments will require replacement
+     * instead of update only if `"*"` is passed.
+     */
+    replaceOnChanges?: string[];
+    /**
      * An optional version, corresponding to the version of the provider plugin that should be used when operating on
      * this resource. This version overrides the version information inferred from the current package and should
      * rarely be used.
@@ -466,6 +537,16 @@ export interface ResourceOptions {
      * An optional customTimeouts configuration block.
      */
     customTimeouts?: CustomTimeouts;
+    /**
+     * Optional list of transformations to apply to this resource during construction. The
+     * transformations are applied in order, and are applied prior to transformation applied to
+     * parents walking from the resource up to the stack.
+     */
+    transformations?: ResourceTransformation[];
+    /**
+     * The URN of a previously-registered resource of this type to read from the engine.
+     */
+    urn?: URN;
 
     // !!! IMPORTANT !!! If you add a new field to this type, make sure to add test that verifies
     // that mergeOptions works properly for it.
@@ -484,6 +565,58 @@ export interface CustomTimeouts {
      * The optional delete timeout represented as a string e.g. 5m, 40s, 1d.
      */
     delete?: string;
+}
+
+/**
+ * ResourceTransformation is the callback signature for the `transformations` resource option.  A
+ * transformation is passed the same set of inputs provided to the `Resource` constructor, and can
+ * optionally return back alternate values for the `props` and/or `opts` prior to the resource
+ * actually being created.  The effect will be as though those props and opts were passed in place
+ * of the original call to the `Resource` constructor.  If the transformation returns undefined,
+ * this indicates that the resource will not be transformed.
+ */
+export type ResourceTransformation = (args: ResourceTransformationArgs) => ResourceTransformationResult | undefined;
+
+/**
+ * ResourceTransformationArgs is the argument bag passed to a resource transformation.
+ */
+export interface ResourceTransformationArgs {
+    /**
+     * The Resource instance that is being transformed.
+     */
+    resource: Resource;
+    /**
+     * The type of the Resource.
+     */
+    type: string;
+    /**
+     * The name of the Resource.
+     */
+    name: string;
+    /**
+     * The original properties passed to the Resource constructor.
+     */
+    props: Inputs;
+    /**
+     * The original resource options passed to the Resource constructor.
+     */
+    opts: ResourceOptions;
+}
+
+/**
+ * ResourceTransformationResult is the result that must be returned by a resource transformation
+ * callback.  It includes new values to use for the `props` and `opts` of the `Resource` in place of
+ * the originally provided values.
+ */
+export interface ResourceTransformationResult {
+    /**
+     * The new properties to use in place of the original `props`
+     */
+    props: Inputs;
+    /**
+     * The new resource options to use in place of the original `opts`
+     */
+    opts: ResourceOptions;
 }
 
 /**
@@ -548,16 +681,16 @@ export interface ComponentResourceOptions extends ResourceOptions {
  */
 export abstract class CustomResource extends Resource {
     /**
-     * @internal
      * A private field to help with RTTI that works in SxS scenarios.
+     * @internal
      */
     // tslint:disable-next-line:variable-name
     public readonly __pulumiCustomResource: boolean;
 
     /**
-     * @internal
      * Private field containing the type ID for this object. Useful for implementing `isInstance` on
      * classes that inherit from `CustomResource`.
+     * @internal
      */
     // tslint:disable-next-line:variable-name
     public readonly __pulumiType: string;
@@ -566,7 +699,7 @@ export abstract class CustomResource extends Resource {
      * id is the provider-assigned unique ID for this managed resource.  It is set during
      * deployments and may be missing (undefined) during planning phases.
      */
-    public readonly id: Output<ID>;
+    public readonly id!: Output<ID>;
 
     /**
      * Returns true if the given object is an instance of CustomResource.  This is designed to work even when
@@ -588,13 +721,14 @@ export abstract class CustomResource extends Resource {
      * @param name The _unique_ name of the resource.
      * @param props The arguments to use to populate the new resource.
      * @param opts A bag of options that control this resource's behavior.
+     * @param dependency True if this is a synthetic resource used internally for dependency tracking.
      */
-    constructor(t: string, name: string, props?: Inputs, opts: CustomResourceOptions = {}) {
+    constructor(t: string, name: string, props?: Inputs, opts: CustomResourceOptions = {}, dependency = false) {
         if ((<ComponentResourceOptions>opts).providers) {
             throw new ResourceError("Do not supply 'providers' option to a CustomResource. Did you mean 'provider' instead?", opts.parent);
         }
 
-        super(t, name, true, props, opts);
+        super(t, name, true, props, opts, false, dependency);
         this.__pulumiCustomResource = true;
         this.__pulumiType = t;
     }
@@ -610,6 +744,24 @@ export abstract class ProviderResource extends CustomResource {
     /** @internal */
     private readonly pkg: string;
 
+    /** @internal */
+    // tslint:disable-next-line: variable-name
+    public __registrationId?: string;
+
+    public static async register(provider: ProviderResource | undefined): Promise<string | undefined> {
+        if (provider === undefined) {
+            return undefined;
+        }
+
+        if (!provider.__registrationId) {
+            const providerURN = await provider.urn.promise();
+            const providerID = await provider.id.promise() || unknownValue;
+            provider.__registrationId = `${providerURN}::${providerID}`;
+        }
+
+        return provider.__registrationId;
+    }
+
     /**
      * Creates and registers a new provider resource for a particular package.
      *
@@ -617,9 +769,10 @@ export abstract class ProviderResource extends CustomResource {
      * @param name The _unique_ name of the provider.
      * @param props The configuration to use for this provider.
      * @param opts A bag of options that control this provider's behavior.
+     * @param dependency True if this is a synthetic resource used internally for dependency tracking.
      */
-    constructor(pkg: string, name: string, props?: Inputs, opts: ResourceOptions = {}) {
-        super(`pulumi:providers:${pkg}`, name, props, opts);
+    constructor(pkg: string, name: string, props?: Inputs, opts: ResourceOptions = {}, dependency: boolean = false) {
+        super(`pulumi:providers:${pkg}`, name, props, opts, dependency);
         this.pkg = pkg;
     }
 
@@ -634,13 +787,25 @@ export abstract class ProviderResource extends CustomResource {
  * level abstraction. The component resource itself is a resource, but does not require custom CRUD
  * operations for provisioning.
  */
-export class ComponentResource extends Resource {
+export class ComponentResource<TData = any> extends Resource {
     /**
-     * @internal
      * A private field to help with RTTI that works in SxS scenarios.
+     * @internal
      */
     // tslint:disable-next-line:variable-name
-    public readonly __pulumiComponentResource: boolean;
+    public readonly __pulumiComponentResource = true;
+
+    /** @internal */
+    // tslint:disable-next-line:variable-name
+    public readonly __data: Promise<TData>;
+
+    /** @internal */
+    // tslint:disable-next-line:variable-name
+    private __registered = false;
+
+    /** @internal */
+    // tslint:disable-next-line:variable-name
+    public readonly __remote: boolean;
 
     /**
      * Returns true if the given object is an instance of CustomResource.  This is designed to work even when
@@ -659,11 +824,11 @@ export class ComponentResource extends Resource {
      *
      * @param t The type of the resource.
      * @param name The _unique_ name of the resource.
-     * @param unused [Deprecated].  Component resources do not communicate or store their properties
-     *               with the Pulumi engine.
+     * @param args Information passed to [initialize] method.
      * @param opts A bag of options that control this resource's behavior.
+     * @param remote True if this is a remote component resource.
      */
-    constructor(type: string, name: string, unused?: Inputs, opts: ComponentResourceOptions = {}) {
+    constructor(type: string, name: string, args: Inputs = {}, opts: ComponentResourceOptions = {}, remote: boolean = false) {
         // Explicitly ignore the props passed in.  We allow them for back compat reasons.  However,
         // we explicitly do not want to pass them along to the engine.  The ComponentResource acts
         // only as a container for other resources.  Another way to think about this is that a normal
@@ -672,29 +837,63 @@ export class ComponentResource extends Resource {
         // for a component resource.  The component is just used for organizational purposes and does
         // not correspond to a real piece of cloud infrastructure.  As such, changes to it *itself*
         // do not have any effect on the cloud side of things at all.
-        super(type, name, /*custom:*/ false, /*props:*/ {}, opts);
-        this.__pulumiComponentResource = true;
+        super(type, name, /*custom:*/ false, /*props:*/ remote || opts?.urn ? args : {}, opts, remote);
+        this.__remote = remote;
+        this.__registered = remote || !!opts?.urn;
+        this.__data = remote || opts?.urn ? Promise.resolve(<TData>{}) : this.initializeAndRegisterOutputs(args);
     }
 
-    // registerOutputs registers synthetic outputs that a component has initialized, usually by
-    // allocating other child sub-resources and propagating their resulting property values.
-    // ComponentResources should always call this at the end of their constructor to indicate that
-    // they are done creating child resources.  While not strictly necessary, this helps the
-    // experience by ensuring the UI transitions the ComponentResource to the 'complete' state as
-    // quickly as possible (instead of waiting until the entire application completes).
+    /** @internal */
+    private async initializeAndRegisterOutputs(args: Inputs) {
+        const data = await this.initialize(args);
+        this.registerOutputs();
+        return data;
+    }
+
+    /**
+     * Can be overridden by a subclass to asynchronously initialize data for this Component
+     * automatically when constructed.  The data will be available immediately for subclass
+     * constructors to use.  To access the data use `.getData`.
+     */
+    protected async initialize(args: Inputs): Promise<TData> {
+        return <TData>undefined!;
+    }
+
+    /**
+     * Retrieves the data produces by [initialize].  The data is immediately available in a
+     * derived class's constructor after the `super(...)` call to `ComponentResource`.
+     */
+    protected getData(): Promise<TData> {
+        return this.__data;
+    }
+
+    /**
+     * registerOutputs registers synthetic outputs that a component has initialized, usually by
+     * allocating other child sub-resources and propagating their resulting property values.
+     *
+     * ComponentResources can call this at the end of their constructor to indicate that they are
+     * done creating child resources.  This is not strictly necessary as this will automatically be
+     * called after the `initialize` method completes.
+     */
     protected registerOutputs(outputs?: Inputs | Promise<Inputs> | Output<Inputs>): void {
+        if (this.__registered) {
+            return;
+        }
+
+        this.__registered = true;
         registerResourceOutputs(this, outputs || {});
     }
 }
 
 (<any>ComponentResource).doNotCapture = true;
 (<any>ComponentResource.prototype).registerOutputs.doNotCapture = true;
+(<any>ComponentResource.prototype).initialize.doNotCapture = true;
+(<any>ComponentResource.prototype).initializeAndRegisterOutputs.doNotCapture = true;
 
 /** @internal */
 export const testingOptions = {
     isDryRun: false,
 };
-
 
 /**
  * [mergeOptions] takes two ResourceOptions values and produces a new ResourceOptions with the
@@ -750,7 +949,8 @@ function isPromiseOrOutput(val: any): boolean {
     return val instanceof Promise || Output.isInstance(val);
 }
 
-function expandProviders(options: ComponentResourceOptions) {
+/** @internal */
+export function expandProviders(options: ComponentResourceOptions) {
     // Move 'provider' up to 'providers' if we have it.
     if (options.provider) {
         options.providers = [options.provider];
@@ -813,5 +1013,39 @@ function addToArray(resultArray: any[], value: any) {
     }
     else if (value !== undefined && value !== null) {
         resultArray.push(value);
+    }
+}
+
+/**
+ * A DependencyResource is a resource that is used to indicate that an Output has a dependency on a particular
+ * resource. These resources are only created when dealing with remote component resources.
+ */
+export class DependencyResource extends CustomResource {
+    constructor(urn: URN) {
+        super("", "", {}, {}, true);
+
+        (<any>this).urn = new Output(<any>this, Promise.resolve(urn), Promise.resolve(true), Promise.resolve(false),
+            Promise.resolve([]));
+    }
+}
+
+/**
+ * A DependencyProviderResource is a resource that is used by the provider SDK as a stand-in for a provider that
+ * is only used for its reference. Its only valid properties are its URN and ID.
+ */
+export class DependencyProviderResource extends ProviderResource {
+    constructor(ref: string) {
+        super("", "", {}, {}, true);
+
+        // Parse the URN and ID out of the provider reference.
+        const lastSep = ref.lastIndexOf("::");
+        if (lastSep === -1) {
+            throw new Error(`expected '::' in provider reference ${ref}`);
+        }
+        const urn = ref.slice(0, lastSep);
+        const id = ref.slice(lastSep+2);
+
+        (<any>this).urn = new Output(<any>this, Promise.resolve(urn), Promise.resolve(true), Promise.resolve(false), Promise.resolve([]));
+        (<any>this).id = new Output(<any>this, Promise.resolve(id), Promise.resolve(true), Promise.resolve(false), Promise.resolve([]));
     }
 }

@@ -19,8 +19,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
-	"github.com/pulumi/pulumi/pkg/resource"
-	"github.com/pulumi/pulumi/pkg/tokens"
+	"github.com/pulumi/pulumi/sdk/v3/go/common/resource"
+	"github.com/pulumi/pulumi/sdk/v3/go/common/tokens"
 )
 
 func TestRoundTripProviderType(t *testing.T) {
@@ -31,7 +31,8 @@ func TestRoundTripProviderType(t *testing.T) {
 
 func TestParseReferenceInvalidURN(t *testing.T) {
 	str := "not::a:valid:urn::id"
-	assert.Panics(t, func() { _, _ = ParseReference(str) })
+	_, err := ParseReference(str)
+	assert.Error(t, err)
 }
 
 func TestParseReferenceInvalidModule(t *testing.T) {

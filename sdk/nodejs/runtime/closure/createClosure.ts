@@ -24,6 +24,7 @@ import { rewriteSuperReferences } from "./rewriteSuper";
 import * as utils from "./utils";
 import * as v8 from "./v8";
 
+/** @internal */
 export interface ObjectInfo {
     // information about the prototype of this object/function.  If this is an object, we only store
     // this if the object's prototype is not Object.prototype.  If this is a function, we only store
@@ -37,6 +38,7 @@ export interface ObjectInfo {
 
 // Information about a javascript function.  Note that this derives from ObjectInfo as all functions
 // are objects in JS, and thus can have their own proto and properties.
+/** @internal */
 export interface FunctionInfo extends ObjectInfo {
     // a serialization of the function's source code as text.
     code: string;
@@ -60,6 +62,7 @@ export interface FunctionInfo extends ObjectInfo {
 
 // Similar to PropertyDescriptor.  Helps describe an Entry in the case where it is not
 // simple.
+/** @internal */
 export interface PropertyInfo {
     // If the property has a value we should directly provide when calling .defineProperty
     hasValue: boolean;
@@ -77,6 +80,7 @@ export interface PropertyInfo {
 
 // Information about a property.  Specifically the actual entry containing the data about it and
 // then an optional PropertyInfo in the case that this isn't just a common property.
+/** @internal */
 export interface PropertyInfoAndValue {
     info?: PropertyInfo;
     entry: Entry;
@@ -84,12 +88,14 @@ export interface PropertyInfoAndValue {
 
 // A mapping between the name of a property (symbolic or string) to information about the
 // value for that property.
+/** @internal */
 export interface PropertyMap extends Map<Entry, PropertyInfoAndValue> {
 }
 
 /**
  * Entry is the environment slot for a named lexically captured variable.
  */
+/** @internal */
 export interface Entry {
     // a value which can be safely json serialized.
     json?: any;
@@ -155,6 +161,11 @@ interface Context {
      * The resource to log any errors we encounter against.
      */
     logResource: resource.Resource | undefined;
+
+    /**
+     * Indicates whether any secret values were serialized during this function serialization.
+     */
+    containsSecrets: boolean;
 }
 
 interface FunctionLocation {
@@ -210,14 +221,21 @@ class SerializedOutput<T> {
     }
 }
 
+export interface ClosureInfo {
+    func: FunctionInfo;
+    containsSecrets: boolean;
+}
+
 /**
  * createFunctionInfo serializes a function and its closure environment into a form that is
  * amenable to persistence as simple JSON.  Like toString, it includes the full text of the
  * function's source code, suitable for execution. Unlike toString, it actually includes information
  * about the captured environment.
+ *
+ * @internal
  */
-export async function createFunctionInfoAsync(
-    func: Function, serialize: (o: any) => boolean, logResource: resource.Resource | undefined): Promise<FunctionInfo> {
+export async function createClosureInfoAsync(
+    func: Function, serialize: (o: any) => boolean, logResource: resource.Resource | undefined): Promise<ClosureInfo> {
 
     // Initialize our Context object.  It is effectively used to keep track of the work we're doing
     // as well as to keep track of the graph as we're walking it so we don't infinitely recurse.
@@ -228,6 +246,7 @@ export async function createFunctionInfoAsync(
         frames: [],
         simpleFunctions: [],
         logResource,
+        containsSecrets: false,
     };
 
     // Pre-populate our context's cache with global well-known values.  These are values for things
@@ -243,7 +262,10 @@ export async function createFunctionInfoAsync(
 
     entry.function = await analyzeFunctionInfoAsync(func, context, serialize);
 
-    return entry.function;
+    return {
+        func: entry.function,
+        containsSecrets: context.containsSecrets,
+    };
 
     async function addEntriesForWellKnownGlobalObjectsAsync() {
         const seenGlobalObjects = new Set<any>();
@@ -333,7 +355,7 @@ export async function createFunctionInfoAsync(
 
 // This function ends up capturing many external modules that cannot themselves be serialized.
 // Do not allow it to be captured.
-(<any>createFunctionInfoAsync).doNotCapture = true;
+(<any>createClosureInfoAsync).doNotCapture = true;
 
 /**
  * analyzeFunctionInfoAsync does the work to create an asynchronous dataflow graph that resolves to a
@@ -464,9 +486,11 @@ async function analyzeFunctionInfoAsync(
                 continue;
             }
 
-            functionInfo.env.set(
-                await getOrCreateEntryAsync(getNameOrSymbol(descriptor), undefined, context, serialize, logInfo),
-                { entry: await getOrCreateEntryAsync(funcProp, undefined, context, serialize, logInfo) });
+            const keyEntry = await getOrCreateEntryAsync(getNameOrSymbol(descriptor), undefined, context, serialize, logInfo);
+            const valEntry = await getOrCreateEntryAsync(funcProp, undefined, context, serialize, logInfo);
+            const propertyInfo = await createPropertyInfoAsync(descriptor, context, serialize, logInfo);
+
+            functionInfo.env.set(keyEntry, { info: propertyInfo, entry: valEntry });
         }
 
         const superEntry = context.classInstanceMemberToSuperEntry.get(func) ||
@@ -757,6 +781,28 @@ async function isDefaultFunctionPrototypeAsync(func: Function, prototypeProp: an
     return false;
 }
 
+async function createPropertyInfoAsync(
+        descriptor: ClosurePropertyDescriptor,
+        context: Context,
+        serialize: (o: any) => boolean,
+        logInfo: boolean | undefined): Promise<PropertyInfo> {
+
+    const propertyInfo = <PropertyInfo>{ hasValue: descriptor.value !== undefined };
+    propertyInfo.configurable = descriptor.configurable;
+    propertyInfo.enumerable = descriptor.enumerable;
+    propertyInfo.writable = descriptor.writable;
+    if (descriptor.get) {
+        propertyInfo.get = await getOrCreateEntryAsync(
+          descriptor.get, undefined, context, serialize, logInfo);
+    }
+    if (descriptor.set) {
+        propertyInfo.set = await getOrCreateEntryAsync(
+          descriptor.set, undefined, context, serialize, logInfo);
+    }
+
+    return propertyInfo;
+}
+
 function getOrCreateNameEntryAsync(
     name: string, capturedObjectProperties: CapturedPropertyChain[] | undefined,
     context: Context,
@@ -889,7 +935,7 @@ async function getOrCreateEntryAsync(
         }
         else if (Output.isInstance(obj)) {
             if (await isSecretOutput(obj)) {
-                throw new Error("Secret outputs cannot be captured by a closure.");
+                context.containsSecrets = true;
             }
             entry.output = await createOutputEntryAsync(obj);
         }
@@ -974,7 +1020,7 @@ async function getOrCreateEntryAsync(
             }
             object.env.set(keyEntry, <any>undefined);
 
-            const propertyInfo = await createPropertyInfoAsync(descriptor);
+            const propertyInfo = await createPropertyInfoAsync(descriptor, context, serialize, logInfo);
             const prop = await getOwnPropertyAsync(obj, descriptor);
             const valEntry = await getOrCreateEntryAsync(
                 prop, undefined, context, serialize, logInfo);
@@ -1123,29 +1169,12 @@ async function getOrCreateEntryAsync(
             const desc = Object.getOwnPropertyDescriptor(current, key);
             if (desc) {
                 const closurePropDescriptor = createClosurePropertyDescriptor(key, desc);
-                const propertyInfo = await createPropertyInfoAsync(closurePropDescriptor);
+                const propertyInfo = await createPropertyInfoAsync(closurePropDescriptor, context, serialize, logInfo);
                 return propertyInfo;
             }
         }
 
         return undefined;
-    }
-
-    async function createPropertyInfoAsync(descriptor: ClosurePropertyDescriptor): Promise<PropertyInfo> {
-        const propertyInfo = <PropertyInfo>{ hasValue: descriptor.value !== undefined };
-        propertyInfo.configurable = descriptor.configurable;
-        propertyInfo.enumerable = descriptor.enumerable;
-        propertyInfo.writable = descriptor.writable;
-        if (descriptor.get) {
-            propertyInfo.get = await getOrCreateEntryAsync(
-                descriptor.get, undefined, context, serialize, logInfo);
-        }
-        if (descriptor.set) {
-            propertyInfo.set = await getOrCreateEntryAsync(
-                descriptor.set, undefined, context, serialize, logInfo);
-        }
-
-        return propertyInfo;
     }
 
     function usesNonLexicalThis(localEntry: Entry | undefined) {
@@ -1392,7 +1421,9 @@ async function getOwnPropertyDescriptors(obj: any): Promise<ClosurePropertyDescr
 }
 
 async function getOwnPropertyAsync(obj: any, descriptor: ClosurePropertyDescriptor): Promise<any> {
-    return obj[getNameOrSymbol(descriptor)];
+    return (descriptor.get || descriptor.set) ?
+      undefined :
+      obj[getNameOrSymbol(descriptor)];
 }
 
 async function getPropertyAsync(obj: any, name: string): Promise<any> {

@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+import * as log from "../../log";
+
 // The very first thing we do is set up unhandled exception and rejection hooks to ensure that these
 // events cause us to exit with a non-zero code. It is critically important that we do this early:
 // if we do not, unhandled rejections in particular may cause us to exit with a 0 exit code, which
@@ -32,8 +34,10 @@ const loggedErrors = new Set<Error>();
 let programRunning = false;
 const uncaughtHandler = (err: Error) => {
     uncaughtErrors.add(err);
-    if (!programRunning) {
-        console.error(err.stack || err.message);
+    if (!programRunning && !loggedErrors.has(err)) {
+        log.error(err.stack || err.message || ("" + err));
+        // dedupe errors that we're reporting when the program is not running
+        loggedErrors.add(err);
     }
 };
 
@@ -44,12 +48,14 @@ const uncaughtHandler = (err: Error) => {
 // 32 was picked so as to be very unlikely to collide with any of the error codes documented by
 // nodejs here:
 // https://github.com/nodejs/node-v0.x-archive/blob/master/doc/api/process.markdown#exit-codes
+/** @internal */
 export const nodeJSProcessExitedAfterLoggingUserActionableMessage = 32;
 
 process.on("uncaughtException", uncaughtHandler);
+// @ts-ignore 'unhandledRejection' will almost always invoke uncaughtHandler with an Error. so just
+// suppress the TS strictness here.
 process.on("unhandledRejection", uncaughtHandler);
 process.on("exit", (code: number) => {
-
     // If there were any uncaught errors at all, we always want to exit with an error code. If we
     // did not, it could be disastrous for the user.  i.e. not all resources may have been created,
     // but the 0 code would indicate we could proceed.  That could lead to many (or all) of the
@@ -92,6 +98,7 @@ function usage(): void {
     console.error(`        --pwd=pwd           change the working directory before running the program`);
     console.error(`        --monitor=addr      [required] the RPC address for a resource monitor to connect to`);
     console.error(`        --engine=addr       the RPC address for a resource engine to connect to`);
+    console.error(`        --sync=path         path to synchronous 'invoke' endpoints`);
     console.error(`        --tracing=url       a Zipkin-compatible endpoint to send tracing data to`);
     console.error(``);
     console.error(`    and [program] is a JavaScript program to run in Node.js, and [arg]... optional args to it.`);
@@ -144,13 +151,15 @@ function main(args: string[]): void {
     addToEnvIfDefined("PULUMI_NODEJS_PARALLEL", argv["parallel"]);
     addToEnvIfDefined("PULUMI_NODEJS_MONITOR", argv["monitor"]);
     addToEnvIfDefined("PULUMI_NODEJS_ENGINE", argv["engine"]);
+    addToEnvIfDefined("PULUMI_NODEJS_SYNC", argv["sync"]);
 
     // Ensure that our v8 hooks have been initialized.  Then actually load and run the user program.
     v8Hooks.isInitializedAsync().then(() => {
         const promise: Promise<void> = require("./run").run(
             argv,
             /*programStarted:   */ () => programRunning = true,
-            /*reportLoggedError:*/ (err: Error) => loggedErrors.add(err));
+            /*reportLoggedError:*/ (err: Error) => loggedErrors.add(err),
+            /*isErrorReported:  */ (err: Error) => loggedErrors.has(err));
 
         // when the user's program completes successfully, set programRunning back to false.  That way, if the Pulumi
         // scaffolding code ends up throwing an exception during teardown, it will get printed directly to the console.

@@ -15,15 +15,19 @@
 package display
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
+	"os"
+	"time"
 
-	"github.com/pulumi/pulumi/pkg/apitype"
-	"github.com/pulumi/pulumi/pkg/engine"
-	"github.com/pulumi/pulumi/pkg/resource"
-	"github.com/pulumi/pulumi/pkg/resource/deploy"
-	"github.com/pulumi/pulumi/pkg/tokens"
-	"github.com/pulumi/pulumi/pkg/util/contract"
+	"github.com/pulumi/pulumi/pkg/v3/engine"
+	"github.com/pulumi/pulumi/pkg/v3/resource/deploy"
+	"github.com/pulumi/pulumi/sdk/v3/go/common/apitype"
+	"github.com/pulumi/pulumi/sdk/v3/go/common/resource"
+	"github.com/pulumi/pulumi/sdk/v3/go/common/tokens"
+	"github.com/pulumi/pulumi/sdk/v3/go/common/util/contract"
+	"github.com/pulumi/pulumi/sdk/v3/go/common/util/logging"
 )
 
 // ShowEvents reads events from the `events` channel until it is closed, displaying each event as
@@ -32,6 +36,10 @@ import (
 func ShowEvents(
 	op string, action apitype.UpdateKind, stack tokens.QName, proj tokens.PackageName,
 	events <-chan engine.Event, done chan<- bool, opts Options, isPreview bool) {
+
+	if opts.EventLogPath != "" {
+		events, done = startEventLogger(events, done, opts.EventLogPath)
+	}
 
 	if opts.JSONDisplay {
 		// TODO[pulumi/pulumi#2390]: enable JSON display for real deployments.
@@ -48,9 +56,56 @@ func ShowEvents(
 	case DisplayQuery:
 		contract.Failf("DisplayQuery can only be used in query mode, which should be invoked " +
 			"directly instead of through ShowEvents")
+	case DisplayWatch:
+		ShowWatchEvents(op, action, events, done, opts)
 	default:
 		contract.Failf("Unknown display type %d", opts.Type)
 	}
+}
+
+func startEventLogger(events <-chan engine.Event, done chan<- bool, path string) (<-chan engine.Event, chan<- bool) {
+	// Before moving further, attempt to open the log file.
+	logFile, err := os.Create(path)
+	if err != nil {
+		logging.V(7).Infof("could not create event log: %v", err)
+		return events, done
+	}
+
+	outEvents, outDone := make(chan engine.Event), make(chan bool)
+	go func() {
+		defer close(done)
+		defer func() {
+			contract.IgnoreError(logFile.Close())
+		}()
+
+		sequence := 0
+		encoder := json.NewEncoder(logFile)
+		logEvent := func(e engine.Event) error {
+			apiEvent, err := ConvertEngineEvent(e)
+			if err != nil {
+				return err
+			}
+			apiEvent.Sequence, sequence = sequence, sequence+1
+			apiEvent.Timestamp = int(time.Now().Unix())
+			return encoder.Encode(apiEvent)
+		}
+
+		for e := range events {
+			if err = logEvent(e); err != nil {
+				logging.V(7).Infof("failed to log event: %v", err)
+			}
+
+			outEvents <- e
+
+			if e.Type == engine.CancelEvent {
+				break
+			}
+		}
+
+		<-outDone
+	}()
+
+	return outEvents, outDone
 }
 
 type nopSpinner struct {

@@ -25,14 +25,14 @@ import (
 
 	"github.com/dustin/go-humanize/english"
 
-	"github.com/pulumi/pulumi/pkg/apitype"
-	"github.com/pulumi/pulumi/pkg/diag"
-	"github.com/pulumi/pulumi/pkg/diag/colors"
-	"github.com/pulumi/pulumi/pkg/engine"
-	"github.com/pulumi/pulumi/pkg/resource"
-	"github.com/pulumi/pulumi/pkg/resource/deploy"
-	"github.com/pulumi/pulumi/pkg/util/cmdutil"
-	"github.com/pulumi/pulumi/pkg/util/contract"
+	"github.com/pulumi/pulumi/pkg/v3/engine"
+	"github.com/pulumi/pulumi/pkg/v3/resource/deploy"
+	"github.com/pulumi/pulumi/sdk/v3/go/common/apitype"
+	"github.com/pulumi/pulumi/sdk/v3/go/common/diag"
+	"github.com/pulumi/pulumi/sdk/v3/go/common/diag/colors"
+	"github.com/pulumi/pulumi/sdk/v3/go/common/resource"
+	"github.com/pulumi/pulumi/sdk/v3/go/common/util/cmdutil"
+	"github.com/pulumi/pulumi/sdk/v3/go/common/util/contract"
 )
 
 // ShowDiffEvents displays the engine events with the diff view.
@@ -41,10 +41,18 @@ func ShowDiffEvents(op string, action apitype.UpdateKind,
 
 	prefix := fmt.Sprintf("%s%s...", cmdutil.EmojiOr("✨ ", "@ "), op)
 
+	stdout := opts.Stdout
+	if stdout == nil {
+		stdout = os.Stdout
+	}
+	stderr := opts.Stderr
+	if stderr == nil {
+		stderr = os.Stderr
+	}
+
 	var spinner cmdutil.Spinner
 	var ticker *time.Ticker
-
-	if opts.IsInteractive {
+	if stdout == os.Stdout && stderr == os.Stderr && opts.IsInteractive {
 		spinner, ticker = cmdutil.NewSpinnerAndTicker(prefix, nil, 8 /*timesPerSecond*/)
 	} else {
 		spinner = &nopSpinner{}
@@ -66,11 +74,11 @@ func ShowDiffEvents(op string, action apitype.UpdateKind,
 		case event := <-events:
 			spinner.Reset()
 
-			out := os.Stdout
+			out := stdout
 			if event.Type == engine.DiagEvent {
-				payload := event.Payload.(engine.DiagEventPayload)
+				payload := event.Payload().(engine.DiagEventPayload)
 				if payload.Severity == diag.Error || payload.Severity == diag.Warning {
-					out = os.Stderr
+					out = stderr
 				}
 			}
 
@@ -96,25 +104,26 @@ func RenderDiffEvent(action apitype.UpdateKind, event engine.Event,
 		// Currently, prelude, summary, and stdout events are printed the same for both the diff and
 		// progress displays.
 	case engine.PreludeEvent:
-		return renderPreludeEvent(event.Payload.(engine.PreludeEventPayload), opts)
+		return renderPreludeEvent(event.Payload().(engine.PreludeEventPayload), opts)
 	case engine.SummaryEvent:
-		return renderSummaryEvent(action, event.Payload.(engine.SummaryEventPayload), opts)
+		const wroteDiagnosticHeader = false
+		return renderSummaryEvent(action, event.Payload().(engine.SummaryEventPayload), wroteDiagnosticHeader, opts)
 	case engine.StdoutColorEvent:
-		return renderStdoutColorEvent(event.Payload.(engine.StdoutEventPayload), opts)
+		return renderStdoutColorEvent(event.Payload().(engine.StdoutEventPayload), opts)
 
 		// Resource operations have very specific displays for either diff or progress displays.
 		// These functions should not be directly used by the progress display without validating
 		// that the display is appropriate for both.
 	case engine.ResourceOperationFailed:
-		return renderDiffResourceOperationFailedEvent(event.Payload.(engine.ResourceOperationFailedPayload), opts)
+		return renderDiffResourceOperationFailedEvent(event.Payload().(engine.ResourceOperationFailedPayload), opts)
 	case engine.ResourceOutputsEvent:
-		return renderDiffResourceOutputsEvent(event.Payload.(engine.ResourceOutputsEventPayload), seen, opts)
+		return renderDiffResourceOutputsEvent(event.Payload().(engine.ResourceOutputsEventPayload), seen, opts)
 	case engine.ResourcePreEvent:
-		return renderDiffResourcePreEvent(event.Payload.(engine.ResourcePreEventPayload), seen, opts)
+		return renderDiffResourcePreEvent(event.Payload().(engine.ResourcePreEventPayload), seen, opts)
 	case engine.DiagEvent:
-		return renderDiffDiagEvent(event.Payload.(engine.DiagEventPayload), opts)
+		return renderDiffDiagEvent(event.Payload().(engine.DiagEventPayload), opts)
 	case engine.PolicyViolationEvent:
-		return renderDiffPolicyViolationEvent(event.Payload.(engine.PolicyViolationEventPayload), opts)
+		return renderDiffPolicyViolationEvent(event.Payload().(engine.PolicyViolationEventPayload), opts)
 
 	default:
 		contract.Failf("unknown event type '%s'", event.Type)
@@ -137,10 +146,20 @@ func renderStdoutColorEvent(payload engine.StdoutEventPayload, opts Options) str
 	return opts.Color.Colorize(payload.Message)
 }
 
-func renderSummaryEvent(action apitype.UpdateKind, event engine.SummaryEventPayload, opts Options) string {
+func renderSummaryEvent(action apitype.UpdateKind, event engine.SummaryEventPayload,
+	wroteDiagnosticHeader bool, opts Options) string {
+
 	changes := event.ResourceChanges
 
 	out := &bytes.Buffer{}
+
+	// If this is a failed preview, we only render the Policy Packs that ran. This is because rendering the summary
+	// for a failed preview may be surprising/misleading, as it does not describe the totality of the proposed changes
+	// (as the preview may have aborted when the error occurred).
+	if event.IsPreview && wroteDiagnosticHeader {
+		renderPolicyPacks(out, event.PolicyPacks, opts)
+		return out.String()
+	}
 	fprintIgnoreError(out, opts.Color.Colorize(
 		fmt.Sprintf("%sResources:%s\n", colors.SpecHeadline, colors.Reset)))
 
@@ -208,6 +227,9 @@ func renderSummaryEvent(action apitype.UpdateKind, event engine.SummaryEventPayl
 		fprintfIgnoreError(out, "\n")
 	}
 
+	// Print policy packs loaded. Data is rendered as a table of {policy-pack-name, version}.
+	renderPolicyPacks(out, event.PolicyPacks, opts)
+
 	// For actual deploys, we print some additional summary information
 	if !event.IsPreview {
 		// Round up to the nearest second.  It's not useful to spit out time with 9 digits of
@@ -220,6 +242,33 @@ func renderSummaryEvent(action apitype.UpdateKind, event engine.SummaryEventPayl
 	}
 
 	return out.String()
+}
+
+func renderPolicyPacks(out io.Writer, policyPacks map[string]string, opts Options) {
+	if len(policyPacks) == 0 {
+		return
+	}
+	fprintIgnoreError(out, opts.Color.Colorize(fmt.Sprintf("\n%sPolicy Packs run:%s\n",
+		colors.SpecHeadline, colors.Reset)))
+
+	// Calculate column width for the `name` column
+	const nameColHeader = "Name"
+	maxNameLen := len(nameColHeader)
+	for pp := range policyPacks {
+		if l := len(pp); l > maxNameLen {
+			maxNameLen = l
+		}
+	}
+
+	// Print the column headers and the policy packs.
+	fprintIgnoreError(out, opts.Color.Colorize(
+		fmt.Sprintf("    %s%s%s\n",
+			columnHeader(nameColHeader), messagePadding(nameColHeader, maxNameLen, 2),
+			columnHeader("Version"))))
+	for pp, ver := range policyPacks {
+		fprintIgnoreError(out, opts.Color.Colorize(
+			fmt.Sprintf("    %s%s%s\n", pp, messagePadding(pp, maxNameLen, 2), ver)))
+	}
 }
 
 func renderPreludeEvent(event engine.PreludeEventPayload, opts Options) string {
@@ -327,9 +376,12 @@ func renderDiffResourceOutputsEvent(
 		}
 
 		if !opts.SuppressOutputs {
-			if text := engine.GetResourceOutputsPropertiesString(
-				payload.Metadata, indent+1, payload.Planning, payload.Debug, refresh); text != "" {
-
+			// We want to hide same outputs if we're doing a read and the user didn't ask to see
+			// things that are the same.
+			text := engine.GetResourceOutputsPropertiesString(
+				payload.Metadata, indent+1, payload.Planning,
+				payload.Debug, refresh, opts.ShowSameResources)
+			if text != "" {
 				header := fmt.Sprintf("%v%v--outputs:--%v\n",
 					payload.Metadata.Op.Color(), engine.GetIndentationString(indent+1), colors.Reset)
 				fprintfIgnoreError(out, opts.Color.Colorize(header))

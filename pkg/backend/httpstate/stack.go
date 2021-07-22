@@ -19,24 +19,25 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/pulumi/pulumi/pkg/apitype"
-	"github.com/pulumi/pulumi/pkg/backend"
-	"github.com/pulumi/pulumi/pkg/backend/httpstate/client"
-	"github.com/pulumi/pulumi/pkg/engine"
-	"github.com/pulumi/pulumi/pkg/operations"
-	"github.com/pulumi/pulumi/pkg/resource/deploy"
-	"github.com/pulumi/pulumi/pkg/tokens"
-	"github.com/pulumi/pulumi/pkg/util/contract"
-	"github.com/pulumi/pulumi/pkg/util/result"
+	"github.com/pulumi/pulumi/pkg/v3/backend"
+	"github.com/pulumi/pulumi/pkg/v3/backend/httpstate/client"
+	"github.com/pulumi/pulumi/pkg/v3/engine"
+	"github.com/pulumi/pulumi/pkg/v3/operations"
+	"github.com/pulumi/pulumi/pkg/v3/resource/deploy"
+	"github.com/pulumi/pulumi/sdk/v3/go/common/apitype"
+	"github.com/pulumi/pulumi/sdk/v3/go/common/tokens"
+	"github.com/pulumi/pulumi/sdk/v3/go/common/util/contract"
+	"github.com/pulumi/pulumi/sdk/v3/go/common/util/result"
 )
 
 // Stack is a cloud stack.  This simply adds some cloud-specific properties atop the standard backend stack interface.
 type Stack interface {
 	backend.Stack
-	CloudURL() string                      // the URL to the cloud containing this stack.
-	OrgName() string                       // the organization that owns this stack.
-	ConsoleURL() (string, error)           // the URL to view the stack's information on Pulumi.com
-	Tags() map[apitype.StackTagName]string // the stack's tags.
+	CloudURL() string                           // the URL to the cloud containing this stack.
+	OrgName() string                            // the organization that owns this stack.
+	ConsoleURL() (string, error)                // the URL to view the stack's information on Pulumi.com.
+	CurrentOperation() *apitype.OperationStatus // in progress operation, if applicable.
+	Tags() map[apitype.StackTagName]string      // the stack's tags.
 	StackIdentifier() client.StackIdentifier
 }
 
@@ -48,7 +49,7 @@ type cloudBackendReference struct {
 }
 
 func (c cloudBackendReference) String() string {
-	curUser, err := c.b.client.GetPulumiAccountName(context.Background())
+	curUser, err := c.b.CurrentUser()
 	if err != nil {
 		curUser = ""
 	}
@@ -76,6 +77,8 @@ type cloudStack struct {
 	cloudURL string
 	// orgName is the organization that owns this stack.
 	orgName string
+	// currentOperation contains information about any current operation being performed on the stack, as applicable.
+	currentOperation *apitype.OperationStatus
 	// snapshot contains the latest deployment state, allocated on first use.
 	snapshot **deploy.Snapshot
 	// b is a pointer to the backend that this stack belongs to.
@@ -93,20 +96,23 @@ func newStack(apistack apitype.Stack, b *cloudBackend) Stack {
 			name:    apistack.StackName,
 			b:       b,
 		},
-		cloudURL: b.CloudURL(),
-		orgName:  apistack.OrgName,
-		snapshot: nil, // We explicitly allocate the snapshot on first use, since it is expensive to compute.
-		tags:     apistack.Tags,
-		b:        b,
+		cloudURL:         b.CloudURL(),
+		orgName:          apistack.OrgName,
+		currentOperation: apistack.CurrentOperation,
+		snapshot:         nil, // We explicitly allocate the snapshot on first use, since it is expensive to compute.
+		tags:             apistack.Tags,
+		b:                b,
 	}
 }
-func (s *cloudStack) Ref() backend.StackReference           { return s.ref }
-func (s *cloudStack) Backend() backend.Backend              { return s.b }
-func (s *cloudStack) CloudURL() string                      { return s.cloudURL }
-func (s *cloudStack) OrgName() string                       { return s.orgName }
-func (s *cloudStack) Tags() map[apitype.StackTagName]string { return s.tags }
+func (s *cloudStack) Ref() backend.StackReference                { return s.ref }
+func (s *cloudStack) Backend() backend.Backend                   { return s.b }
+func (s *cloudStack) CloudURL() string                           { return s.cloudURL }
+func (s *cloudStack) OrgName() string                            { return s.orgName }
+func (s *cloudStack) CurrentOperation() *apitype.OperationStatus { return s.currentOperation }
+func (s *cloudStack) Tags() map[apitype.StackTagName]string      { return s.tags }
 
 func (s *cloudStack) StackIdentifier() client.StackIdentifier {
+
 	si, err := s.b.getCloudStackIdentifier(s.ref)
 	contract.AssertNoError(err) // the above only fails when ref is of the wrong type.
 	return si
@@ -126,15 +132,11 @@ func (s *cloudStack) Snapshot(ctx context.Context) (*deploy.Snapshot, error) {
 	return *s.snapshot, nil
 }
 
-func (s *cloudStack) Query(ctx context.Context, op backend.UpdateOperation) result.Result {
-	return backend.Query(ctx, s, op)
-}
-
 func (s *cloudStack) Remove(ctx context.Context, force bool) (bool, error) {
 	return backend.RemoveStack(ctx, s, force)
 }
 
-func (s *cloudStack) Rename(ctx context.Context, newName tokens.QName) error {
+func (s *cloudStack) Rename(ctx context.Context, newName tokens.QName) (backend.StackReference, error) {
 	return backend.RenameStack(ctx, s, newName)
 }
 
@@ -146,12 +148,21 @@ func (s *cloudStack) Update(ctx context.Context, op backend.UpdateOperation) (en
 	return backend.UpdateStack(ctx, s, op)
 }
 
+func (s *cloudStack) Import(ctx context.Context, op backend.UpdateOperation,
+	imports []deploy.Import) (engine.ResourceChanges, result.Result) {
+	return backend.ImportStack(ctx, s, op, imports)
+}
+
 func (s *cloudStack) Refresh(ctx context.Context, op backend.UpdateOperation) (engine.ResourceChanges, result.Result) {
 	return backend.RefreshStack(ctx, s, op)
 }
 
 func (s *cloudStack) Destroy(ctx context.Context, op backend.UpdateOperation) (engine.ResourceChanges, result.Result) {
 	return backend.DestroyStack(ctx, s, op)
+}
+
+func (s *cloudStack) Watch(ctx context.Context, op backend.UpdateOperation, paths []string) result.Result {
+	return backend.WatchStack(ctx, s, op, paths)
 }
 
 func (s *cloudStack) GetLogs(ctx context.Context, cfg backend.StackConfiguration,

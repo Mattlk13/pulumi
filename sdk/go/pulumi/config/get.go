@@ -15,117 +15,118 @@
 package config
 
 import (
+	"encoding/json"
+	"strings"
+
 	"github.com/spf13/cast"
 
-	"github.com/pulumi/pulumi/sdk/go/pulumi"
+	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
 )
+
+func ensureKey(ctx *pulumi.Context, key string) string {
+	if !strings.Contains(key, ":") {
+		key = ctx.Project() + ":" + key
+	}
+	return key
+}
+
+func get(ctx *pulumi.Context, key, use, insteadOf string) (string, bool) {
+	key = ensureKey(ctx, key)
+	v, ok := ctx.GetConfig(key)
+	// TODO[pulumi/pulumi#7127]: Re-enabled the warning.
+	// if use != "" && ctx.IsConfigSecret(key) {
+	// 	contract.Assert(insteadOf != "")
+	// 	warning := fmt.Sprintf("Configuration '%s' value is a secret; use `%s` instead of `%s`", key, use, insteadOf)
+	// 	err := ctx.Log.Warn(warning, nil)
+	// 	contract.IgnoreError(err)
+	// }
+	return v, ok
+}
 
 // Get loads an optional configuration value by its key, or returns "" if it doesn't exist.
 func Get(ctx *pulumi.Context, key string) string {
-	v, _ := ctx.GetConfig(key)
+	v, _ := get(ctx, key, "GetSecret", "Get")
 	return v
 }
 
-// GetBool loads an optional configuration value by its key, as a bool, or returns false if it doesn't exist.
-func GetBool(ctx *pulumi.Context, key string) bool {
-	if v, ok := ctx.GetConfig(key); ok {
+func getObject(ctx *pulumi.Context, key string, output interface{}, use, insteadOf string) error {
+	if v, ok := get(ctx, key, use, insteadOf); ok {
+		return json.Unmarshal([]byte(v), output)
+	}
+
+	return nil
+}
+
+// GetObject attempts to load an optional configuration value by its key into the specified output variable.
+func GetObject(ctx *pulumi.Context, key string, output interface{}) error {
+	return getObject(ctx, key, output, "GetSecretObject", "GetObject")
+}
+
+func getBool(ctx *pulumi.Context, key, use, insteadOf string) bool {
+	if v, ok := get(ctx, key, use, insteadOf); ok {
 		return cast.ToBool(v)
 	}
 	return false
 }
 
-// GetFloat32 loads an optional configuration value by its key, as a float32, or returns 0.0 if it doesn't exist.
-func GetFloat32(ctx *pulumi.Context, key string) float32 {
-	if v, ok := ctx.GetConfig(key); ok {
-		return cast.ToFloat32(v)
+// GetBool loads an optional configuration value by its key, as a bool, or returns false if it doesn't exist.
+func GetBool(ctx *pulumi.Context, key string) bool {
+	return getBool(ctx, key, "GetSecretBool", "GetBool")
+}
+
+func getFloat64(ctx *pulumi.Context, key, use, insteadOf string) float64 {
+	if v, ok := get(ctx, key, use, insteadOf); ok {
+		return cast.ToFloat64(v)
 	}
 	return 0
 }
 
-// GetFloat64 loads an optional configuration value by its key, as a float64, or returns 0.0 if it doesn't exist.
+// GetFloat64 loads an optional configuration value by its key, as a float64, or returns 0 if it doesn't exist.
 func GetFloat64(ctx *pulumi.Context, key string) float64 {
-	if v, ok := ctx.GetConfig(key); ok {
-		return cast.ToFloat64(v)
+	return getFloat64(ctx, key, "GetSecretFloat64", "GetFloat64")
+}
+
+func getInt(ctx *pulumi.Context, key, use, insteadOf string) int {
+	if v, ok := get(ctx, key, use, insteadOf); ok {
+		return cast.ToInt(v)
 	}
 	return 0
 }
 
 // GetInt loads an optional configuration value by its key, as a int, or returns 0 if it doesn't exist.
 func GetInt(ctx *pulumi.Context, key string) int {
-	if v, ok := ctx.GetConfig(key); ok {
-		return cast.ToInt(v)
-	}
-	return 0
+	return getInt(ctx, key, "GetSecretInt", "GetInt")
 }
 
-// GetInt8 loads an optional configuration value by its key, as a int8, or returns 0 if it doesn't exist.
-func GetInt8(ctx *pulumi.Context, key string) int8 {
-	if v, ok := ctx.GetConfig(key); ok {
-		return cast.ToInt8(v)
-	}
-	return 0
+// GetSecret loads an optional configuration value by its key, or "" if it does not exist, into a secret Output.
+func GetSecret(ctx *pulumi.Context, key string) pulumi.StringOutput {
+	v, _ := get(ctx, key, "", "")
+	return pulumi.ToSecret(pulumi.String(v)).(pulumi.StringOutput)
 }
 
-// GetInt16 loads an optional configuration value by its key, as a int16, or returns 0 if it doesn't exist.
-func GetInt16(ctx *pulumi.Context, key string) int16 {
-	if v, ok := ctx.GetConfig(key); ok {
-		return cast.ToInt16(v)
+// GetSecretObject attempts to load an optional configuration value by its key into the specified output variable.
+func GetSecretObject(ctx *pulumi.Context, key string, output interface{}) (pulumi.Output, error) {
+	if err := getObject(ctx, key, output, "", ""); err != nil {
+		return nil, err
 	}
-	return 0
+
+	return pulumi.ToSecret(output), nil
 }
 
-// GetInt32 loads an optional configuration value by its key, as a int32, or returns 0 if it doesn't exist.
-func GetInt32(ctx *pulumi.Context, key string) int32 {
-	if v, ok := ctx.GetConfig(key); ok {
-		return cast.ToInt32(v)
-	}
-	return 0
+// GetSecretBool loads an optional bool configuration value by its key,
+// or false if it does not exist, into a secret Output.
+func GetSecretBool(ctx *pulumi.Context, key string) pulumi.BoolOutput {
+	return pulumi.ToSecret(getBool(ctx, key, "", "")).(pulumi.BoolOutput)
 }
 
-// GetInt64 loads an optional configuration value by its key, as a int64, or returns 0 if it doesn't exist.
-func GetInt64(ctx *pulumi.Context, key string) int64 {
-	if v, ok := ctx.GetConfig(key); ok {
-		return cast.ToInt64(v)
-	}
-	return 0
+// GetSecretFloat64 loads an optional float64 configuration value by its key,
+// or false if it does not exist, into a secret Output.
+func GetSecretFloat64(ctx *pulumi.Context, key string) pulumi.Float64Output {
+	return pulumi.ToSecret(getFloat64(ctx, key, "", "")).(pulumi.Float64Output)
 }
 
-// GetUint loads an optional configuration value by its key, as a uint, or returns 0 if it doesn't exist.
-func GetUint(ctx *pulumi.Context, key string) uint {
-	if v, ok := ctx.GetConfig(key); ok {
-		return cast.ToUint(v)
-	}
-	return 0
-}
-
-// GetUint8 loads an optional configuration value by its key, as a uint8, or returns 0 if it doesn't exist.
-func GetUint8(ctx *pulumi.Context, key string) uint8 {
-	if v, ok := ctx.GetConfig(key); ok {
-		return cast.ToUint8(v)
-	}
-	return 0
-}
-
-// GetUint16 loads an optional configuration value by its key, as a uint16, or returns 0 if it doesn't exist.
-func GetUint16(ctx *pulumi.Context, key string) uint16 {
-	if v, ok := ctx.GetConfig(key); ok {
-		return cast.ToUint16(v)
-	}
-	return 0
-}
-
-// GetUint32 loads an optional configuration value by its key, as a uint32, or returns 0 if it doesn't exist.
-func GetUint32(ctx *pulumi.Context, key string) uint32 {
-	if v, ok := ctx.GetConfig(key); ok {
-		return cast.ToUint32(v)
-	}
-	return 0
-}
-
-// GetUint64 loads an optional configuration value by its key, as a uint64, or returns 0 if it doesn't exist.
-func GetUint64(ctx *pulumi.Context, key string) uint64 {
-	if v, ok := ctx.GetConfig(key); ok {
-		return cast.ToUint64(v)
-	}
-	return 0
+// GetSecretInt loads an optional int configuration value by its key,
+// or false if it does not exist, into a secret Output.
+func GetSecretInt(ctx *pulumi.Context, key string) pulumi.IntOutput {
+	return pulumi.ToSecret(getInt(ctx, key, "", "")).(pulumi.IntOutput)
 }

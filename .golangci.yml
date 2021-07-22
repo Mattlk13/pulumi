@@ -1,3 +1,5 @@
+run:
+  timeout: 10m
 linters:
   enable-all: false
   enable:
@@ -9,11 +11,12 @@ linters:
     - gosec
     - govet
     - ineffassign
-    - interfacer
     - lll
-    - megacheck
     - misspell
     - nakedret
     - structcheck
     - unconvert
     - varcheck
+  disable:
+    - staticcheck # Disabled due to OOM errors in golangci-lint@v1.18.0
+    - megacheck # Disabled due to OOM errors in golangci-lint@v1.18.0

@@ -15,11 +15,9 @@
 package filestate
 
 import (
-	"os"
-
-	"github.com/pulumi/pulumi/pkg/resource/deploy"
-	"github.com/pulumi/pulumi/pkg/secrets"
-	"github.com/pulumi/pulumi/pkg/tokens"
+	"github.com/pulumi/pulumi/pkg/v3/resource/deploy"
+	"github.com/pulumi/pulumi/pkg/v3/secrets"
+	"github.com/pulumi/pulumi/sdk/v3/go/common/tokens"
 )
 
 // localSnapshotManager is a simple SnapshotManager implementation that persists snapshots
@@ -35,12 +33,7 @@ func (sp *localSnapshotPersister) SecretsManager() secrets.Manager {
 }
 
 func (sp *localSnapshotPersister) Save(snapshot *deploy.Snapshot) error {
-	_, _, err := sp.backend.getStack(sp.name)
-	if err != nil && !os.IsNotExist(err) {
-		return err
-	}
-
-	_, err = sp.backend.saveStack(sp.name, snapshot, sp.sm)
+	_, err := sp.backend.saveStack(sp.name, snapshot, sp.sm)
 	return err
 
 }

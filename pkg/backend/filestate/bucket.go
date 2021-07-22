@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 
 	"github.com/pkg/errors"
-	"github.com/pulumi/pulumi/pkg/util/logging"
+	"github.com/pulumi/pulumi/sdk/v3/go/common/util/logging"
 	"gocloud.dev/blob"
 )
 
@@ -20,6 +20,7 @@ type Bucket interface {
 	SignedURL(ctx context.Context, key string, opts *blob.SignedURLOptions) (string, error)
 	ReadAll(ctx context.Context, key string) (_ []byte, err error)
 	WriteAll(ctx context.Context, key string, p []byte, opts *blob.WriterOptions) (err error)
+	Exists(ctx context.Context, key string) (bool, error)
 }
 
 // wrappedBucket encapsulates a true gocloud blob.Bucket, but ensures that all paths we send to it
@@ -39,7 +40,9 @@ func (b *wrappedBucket) Delete(ctx context.Context, key string) (err error) {
 }
 
 func (b *wrappedBucket) List(opts *blob.ListOptions) *blob.ListIterator {
-	return b.bucket.List(opts)
+	optsCopy := *opts
+	optsCopy.Prefix = filepath.ToSlash(opts.Prefix)
+	return b.bucket.List(&optsCopy)
 }
 
 func (b *wrappedBucket) SignedURL(ctx context.Context, key string, opts *blob.SignedURLOptions) (string, error) {
@@ -52,6 +55,10 @@ func (b *wrappedBucket) ReadAll(ctx context.Context, key string) (_ []byte, err 
 
 func (b *wrappedBucket) WriteAll(ctx context.Context, key string, p []byte, opts *blob.WriterOptions) (err error) {
 	return b.bucket.WriteAll(ctx, filepath.ToSlash(key), p, opts)
+}
+
+func (b *wrappedBucket) Exists(ctx context.Context, key string) (bool, error) {
+	return b.bucket.Exists(ctx, filepath.ToSlash(key))
 }
 
 // listBucket returns a list of all files in the bucket within a given directory. go-cloud sorts the results by key
@@ -78,7 +85,7 @@ func listBucket(bucket Bucket, dir string) ([]*blob.ListObject, error) {
 	return files, nil
 }
 
-// objectName returns the filename of a ListObject (an object from a bucket)
+// objectName returns the filename of a ListObject (an object from a bucket).
 func objectName(obj *blob.ListObject) string {
 	_, filename := path.Split(obj.Key)
 	return filename

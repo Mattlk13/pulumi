@@ -15,18 +15,22 @@
 package engine
 
 import (
+	"fmt"
+	"os"
 	"sort"
 
 	"github.com/blang/semver"
+	"github.com/pkg/errors"
 	"golang.org/x/sync/errgroup"
 
-	"github.com/pulumi/pulumi/pkg/resource/deploy"
-	"github.com/pulumi/pulumi/pkg/resource/deploy/providers"
-	"github.com/pulumi/pulumi/pkg/resource/plugin"
-	"github.com/pulumi/pulumi/pkg/tokens"
-	"github.com/pulumi/pulumi/pkg/util/contract"
-	"github.com/pulumi/pulumi/pkg/util/logging"
-	"github.com/pulumi/pulumi/pkg/workspace"
+	"github.com/pulumi/pulumi/pkg/v3/resource/deploy"
+	"github.com/pulumi/pulumi/pkg/v3/resource/deploy/providers"
+	"github.com/pulumi/pulumi/sdk/v3/go/common/resource/plugin"
+	"github.com/pulumi/pulumi/sdk/v3/go/common/tokens"
+	"github.com/pulumi/pulumi/sdk/v3/go/common/util/cmdutil"
+	"github.com/pulumi/pulumi/sdk/v3/go/common/util/contract"
+	"github.com/pulumi/pulumi/sdk/v3/go/common/util/logging"
+	"github.com/pulumi/pulumi/sdk/v3/go/common/workspace"
 )
 
 const (
@@ -73,11 +77,16 @@ func newPluginSet() pluginSet {
 func gatherPluginsFromProgram(plugctx *plugin.Context, prog plugin.ProgInfo) (pluginSet, error) {
 	logging.V(preparePluginLog).Infof("gatherPluginsFromProgram(): gathering plugins from language host")
 	set := newPluginSet()
-	langhostPlugins, err := plugctx.Host.GetRequiredPlugins(prog, plugin.AllPlugins)
+	langhostPlugins, err := plugin.GetRequiredPlugins(plugctx.Host, prog, plugin.AllPlugins)
 	if err != nil {
 		return set, err
 	}
 	for _, plug := range langhostPlugins {
+		// Ignore language plugins named "client".
+		if plug.Name == clientRuntimeName && plug.Kind == workspace.LanguagePlugin {
+			continue
+		}
+
 		logging.V(preparePluginLog).Infof(
 			"gatherPluginsFromProgram(): plugin %s %s (%s) is required by language host",
 			plug.Name, plug.Version, plug.ServerURL)
@@ -163,14 +172,19 @@ func installPlugin(plugin workspace.PluginInfo) error {
 
 	logging.V(preparePluginVerboseLog).Infof(
 		"installPlugin(%s, %s): initiating download", plugin.Name, plugin.Version)
-	stream, _, err := plugin.Download()
+	stream, size, err := plugin.Download()
 	if err != nil {
 		return err
 	}
+
+	fmt.Fprintf(os.Stderr, "[%s plugin %s-%s] installing\n", plugin.Kind, plugin.Name, plugin.Version)
+	stream = workspace.ReadCloserProgressBar(stream, size, "Downloading plugin", cmdutil.GetGlobalColorization())
+
 	logging.V(preparePluginVerboseLog).Infof(
 		"installPlugin(%s, %s): extracting tarball to installation directory", plugin.Name, plugin.Version)
 	if err := plugin.Install(stream); err != nil {
-		return err
+		return errors.Wrapf(err, "installing plugin; run `pulumi plugin install %s %s v%s` to retry manually",
+			plugin.Kind, plugin.Name, plugin.Version)
 	}
 
 	logging.V(7).Infof("installPlugin(%s, %s): successfully installed", plugin.Name, plugin.Version)
@@ -211,7 +225,7 @@ func computeDefaultProviderPlugins(languagePlugins, allPlugins pluginSet) map[to
 		sourceSet = allPlugins
 	}
 
-	defaultProviderVersions := make(map[tokens.Package]*semver.Version)
+	defaultProviderPlugins := make(map[tokens.Package]workspace.PluginInfo)
 
 	// Sort the set of source plugins by version, so that we iterate over the set of plugins in a deterministic order.
 	// Sorting by version gets us two properties:
@@ -233,37 +247,44 @@ func computeDefaultProviderPlugins(languagePlugins, allPlugins pluginSet) map[to
 			continue
 		}
 
-		if seenVersion, has := defaultProviderVersions[tokens.Package(p.Name)]; has {
-			if seenVersion == nil {
+		if seenPlugin, has := defaultProviderPlugins[tokens.Package(p.Name)]; has {
+			if seenPlugin.Version == nil {
 				logging.V(preparePluginLog).Infof(
 					"computeDefaultProviderPlugins(): plugin %s selected for package %s (override, previous was nil)",
 					p, p.Name)
-				defaultProviderVersions[tokens.Package(p.Name)] = p.Version
+				defaultProviderPlugins[tokens.Package(p.Name)] = p
 				continue
 			}
 
 			contract.Assertf(p.Version != nil, "p.Version should not be nil if sorting is correct!")
-			if p.Version != nil && p.Version.GT(*seenVersion) {
+			if p.Version != nil && p.Version.GT(*seenPlugin.Version) {
 				logging.V(preparePluginLog).Infof(
 					"computeDefaultProviderPlugins(): plugin %s selected for package %s (override, newer than previous %s)",
-					p, p.Name, seenVersion)
-				defaultProviderVersions[tokens.Package(p.Name)] = p.Version
+					p, p.Name, seenPlugin.Version)
+				defaultProviderPlugins[tokens.Package(p.Name)] = p
 				continue
 			}
 
-			contract.Failf("Should not have seen an older plugin if sorting is correct!")
+			contract.Failf("Should not have seen an older plugin if sorting is correct!\n  %s-%s %s\n  %s-%s - %s",
+				p.Name, p.Version.String(), p.Path,
+				seenPlugin.Name, seenPlugin.Version.String(), seenPlugin.Path)
 		}
 
 		logging.V(preparePluginLog).Infof(
 			"computeDefaultProviderPlugins(): plugin %s selected for package %s (first seen)", p, p.Name)
-		defaultProviderVersions[tokens.Package(p.Name)] = p.Version
+		defaultProviderPlugins[tokens.Package(p.Name)] = p
 	}
 
 	if logging.V(preparePluginLog) {
 		logging.V(preparePluginLog).Infoln("computeDefaultProviderPlugins(): summary of default plugins:")
-		for pkg, version := range defaultProviderVersions {
-			logging.V(preparePluginLog).Infof("  %-15s = %s", pkg, version)
+		for pkg, info := range defaultProviderPlugins {
+			logging.V(preparePluginLog).Infof("  %-15s = %s", pkg, info.Version)
 		}
+	}
+
+	defaultProviderVersions := make(map[tokens.Package]*semver.Version)
+	for name, plugin := range defaultProviderPlugins {
+		defaultProviderVersions[name] = plugin.Version
 	}
 
 	return defaultProviderVersions

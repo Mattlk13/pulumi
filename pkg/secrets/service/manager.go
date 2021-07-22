@@ -1,3 +1,18 @@
+// Copyright 2016-2021, Pulumi Corporation.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+// Package service implements support for the Pulumi Service secret manager.
 package service
 
 import (
@@ -6,15 +21,14 @@ import (
 	"encoding/json"
 	"io/ioutil"
 
-	"github.com/pulumi/pulumi/pkg/diag"
-
-	"github.com/pulumi/pulumi/pkg/workspace"
-
 	"github.com/pkg/errors"
-	"github.com/pulumi/pulumi/pkg/backend/httpstate/client"
-	"github.com/pulumi/pulumi/pkg/resource/config"
-	"github.com/pulumi/pulumi/pkg/secrets"
-	"github.com/pulumi/pulumi/pkg/util/contract"
+
+	"github.com/pulumi/pulumi/pkg/v3/backend/httpstate/client"
+	"github.com/pulumi/pulumi/pkg/v3/secrets"
+	"github.com/pulumi/pulumi/sdk/v3/go/common/diag"
+	"github.com/pulumi/pulumi/sdk/v3/go/common/resource/config"
+	"github.com/pulumi/pulumi/sdk/v3/go/common/util/contract"
+	"github.com/pulumi/pulumi/sdk/v3/go/common/workspace"
 )
 
 const Type = "service"
@@ -101,10 +115,11 @@ func NewServiceSecretsManagerFromState(state json.RawMessage) (secrets.Manager, 
 		return nil, errors.Wrap(err, "unmarshalling state")
 	}
 
-	token, err := workspace.GetAccessToken(s.URL)
+	account, err := workspace.GetAccount(s.URL)
 	if err != nil {
 		return nil, errors.Wrap(err, "getting access token")
 	}
+	token := account.AccessToken
 
 	if token == "" {
 		return nil, errors.Errorf("could not find access token for %s, have you logged in?", s.URL)

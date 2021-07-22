@@ -15,6 +15,7 @@
 import asyncio
 import base64
 from concurrent import futures
+import sys
 import time
 
 import dill
@@ -26,6 +27,11 @@ from pulumi.dynamic import ResourceProvider
 
 _ONE_DAY_IN_SECONDS = 60 * 60 * 24
 PROVIDER_KEY = "__provider"
+
+# _MAX_RPC_MESSAGE_SIZE raises the gRPC Max Message size from `4194304` (4mb) to `419430400` (400mb)
+_MAX_RPC_MESSAGE_SIZE = 1024 * 1024 * 400
+_GRPC_CHANNEL_OPTIONS = [('grpc.max_receive_message_length', _MAX_RPC_MESSAGE_SIZE)]
+
 
 def get_provider(props) -> ResourceProvider:
     byts = base64.b64decode(props[PROVIDER_KEY])
@@ -48,13 +54,13 @@ class DynamicResourceProviderServicer(ResourceProviderServicer):
         raise NotImplementedError("unknown function %s" % request.token)
 
     def Diff(self, request, context):
-        olds = rpc.deserialize_properties(request.olds)
-        news = rpc.deserialize_properties(request.news)
+        olds = rpc.deserialize_properties(request.olds, True)
+        news = rpc.deserialize_properties(request.news, True)
         if news[PROVIDER_KEY] == rpc.UNKNOWN:
             provider = get_provider(olds)
         else:
             provider = get_provider(news)
-        result = provider.diff(request.id, olds, news)
+        result = provider.diff(request.id, olds, news)  # pylint: disable=no-member
         fields = {}
         if result.changes is not None:
             if result.changes:
@@ -74,7 +80,7 @@ class DynamicResourceProviderServicer(ResourceProviderServicer):
         news = rpc.deserialize_properties(request.news)
         provider = get_provider(news)
 
-        result = provider.update(request.id, olds, news)
+        result = provider.update(request.id, olds, news)  # pylint: disable=no-member
         outs = {}
         if result.outs is not None:
             outs = result.outs
@@ -91,7 +97,7 @@ class DynamicResourceProviderServicer(ResourceProviderServicer):
         id_ = request.id
         props = rpc.deserialize_properties(request.properties)
         provider = get_provider(props)
-        provider.delete(id_, props)
+        provider.delete(id_, props)  # pylint: disable=no-member
         return empty_pb2.Empty()
 
     def Cancel(self, request, context):
@@ -100,8 +106,8 @@ class DynamicResourceProviderServicer(ResourceProviderServicer):
     def Create(self, request, context):
         props = rpc.deserialize_properties(request.properties)
         provider = get_provider(props)
-        result = provider.create(props)
-        outs = result.outs
+        result = provider.create(props)  # pylint: disable=no-member
+        outs = result.outs if result.outs is not None else {}
         outs[PROVIDER_KEY] = props[PROVIDER_KEY]
 
         loop = asyncio.new_event_loop()
@@ -112,14 +118,14 @@ class DynamicResourceProviderServicer(ResourceProviderServicer):
         return proto.CreateResponse(**fields)
 
     def Check(self, request, context):
-        olds = rpc.deserialize_properties(request.olds)
-        news = rpc.deserialize_properties(request.news)
+        olds = rpc.deserialize_properties(request.olds, True)
+        news = rpc.deserialize_properties(request.news, True)
         if news[PROVIDER_KEY] == rpc.UNKNOWN:
             provider = get_provider(olds)
         else:
             provider = get_provider(news)
 
-        result = provider.check(olds, news)
+        result = provider.check(olds, news)  # pylint: disable=no-member
         inputs = result.inputs
         failures = result.failures
 
@@ -129,7 +135,7 @@ class DynamicResourceProviderServicer(ResourceProviderServicer):
         inputs_proto = loop.run_until_complete(rpc.serialize_properties(inputs, {}))
         loop.close()
 
-        failures_proto = [proto.CheckFailure(f.property, f.reason) for f in failures]
+        failures_proto = [proto.CheckFailure(property=f.property, reason=f.reason) for f in failures]
 
         fields = {"inputs": inputs_proto, "failures": failures_proto}
         return proto.CheckResponse(**fields)
@@ -142,11 +148,16 @@ class DynamicResourceProviderServicer(ResourceProviderServicer):
         fields = {"version": "0.1.0"}
         return proto.PluginInfo(**fields)
 
+    def GetSchema(self, request, context):
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details("GetSchema is not implemented by the dynamic provider")
+        raise NotImplementedError("GetSchema is not implemented by the dynamic provider")
+
     def Read(self, request, context):
         id_ = request.id
         props = rpc.deserialize_properties(request.properties)
         provider = get_provider(props)
-        result = provider.read(id_, props)
+        result = provider.read(id_, props)  # pylint: disable=no-member
         outs = result.outs
         outs[PROVIDER_KEY] = props[PROVIDER_KEY]
 
@@ -162,11 +173,14 @@ class DynamicResourceProviderServicer(ResourceProviderServicer):
 
 def main():
     monitor = DynamicResourceProviderServicer()
-    server = grpc.server(futures.ThreadPoolExecutor(max_workers=4))
+    server = grpc.server(
+        futures.ThreadPoolExecutor(max_workers=4),  # pylint: disable=consider-using-with
+        options=_GRPC_CHANNEL_OPTIONS
+    )
     provider_pb2_grpc.add_ResourceProviderServicer_to_server(monitor, server)
     port = server.add_insecure_port(address="0.0.0.0:0")
     server.start()
-    print(port)
+    sys.stdout.buffer.write(f"{port}\n".encode())
     try:
         while True:
             time.sleep(_ONE_DAY_IN_SECONDS)

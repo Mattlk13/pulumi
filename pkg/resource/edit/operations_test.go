@@ -18,13 +18,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/pulumi/pulumi/pkg/secrets/b64"
+	"github.com/pulumi/pulumi/pkg/v3/secrets/b64"
 
-	"github.com/pulumi/pulumi/pkg/resource"
-	"github.com/pulumi/pulumi/pkg/resource/deploy"
-	"github.com/pulumi/pulumi/pkg/resource/deploy/providers"
-	"github.com/pulumi/pulumi/pkg/tokens"
-	"github.com/pulumi/pulumi/pkg/version"
+	"github.com/pulumi/pulumi/pkg/v3/resource/deploy"
+	"github.com/pulumi/pulumi/pkg/v3/resource/deploy/providers"
+	"github.com/pulumi/pulumi/pkg/v3/version"
+	"github.com/pulumi/pulumi/sdk/v3/go/common/resource"
+	"github.com/pulumi/pulumi/sdk/v3/go/common/tokens"
 
 	"github.com/stretchr/testify/assert"
 )
@@ -259,4 +259,65 @@ func TestLocateResourceExact(t *testing.T) {
 	resList := LocateResource(snap, a.URN)
 	assert.Len(t, resList, 1)
 	assert.Contains(t, resList, a)
+}
+
+func TestRenameStack(t *testing.T) {
+	pA := NewProviderResource("a", "p1", "0")
+	a := NewResource("a", pA)
+	b := NewResource("b", pA)
+	c := NewResource("c", pA)
+	snap := NewSnapshot([]*resource.State{
+		pA,
+		a,
+		b,
+		c,
+	})
+
+	// Baseline. Can locate resource A.
+	resList := LocateResource(snap, a.URN)
+	assert.Len(t, resList, 1)
+	assert.Contains(t, resList, a)
+	if t.Failed() {
+		t.Fatal("Unable to find expected resource in initial snapshot.")
+	}
+	baselineResourceURN := resList[0].URN
+
+	// The stack name and project are hard-coded in NewResource(...)
+	assert.EqualValues(t, "test", baselineResourceURN.Stack())
+	assert.EqualValues(t, "test", baselineResourceURN.Project())
+
+	// Rename just the stack.
+	t.Run("JustTheStack", func(t *testing.T) {
+		err := RenameStack(snap, tokens.QName("new-stack"), tokens.PackageName(""))
+		if err != nil {
+			t.Fatalf("Error renaming stack: %v", err)
+		}
+
+		// Confirm the previous resource by URN isn't found.
+		assert.Len(t, LocateResource(snap, baselineResourceURN), 0)
+
+		// Confirm the resource has been renamed.
+		updatedResourceURN := resource.NewURN(
+			tokens.QName("new-stack"),
+			"test", // project name stayed the same
+			"" /*parent type*/, baselineResourceURN.Type(),
+			baselineResourceURN.Name())
+		assert.Len(t, LocateResource(snap, updatedResourceURN), 1)
+	})
+
+	// Rename the stack and project.
+	t.Run("StackAndProject", func(t *testing.T) {
+		err := RenameStack(snap, tokens.QName("new-stack2"), tokens.PackageName("new-project"))
+		if err != nil {
+			t.Fatalf("Error renaming stack: %v", err)
+		}
+
+		// Lookup the resource by URN, with both stack and project updated.
+		updatedResourceURN := resource.NewURN(
+			tokens.QName("new-stack2"),
+			"new-project",
+			"" /*parent type*/, baselineResourceURN.Type(),
+			baselineResourceURN.Name())
+		assert.Len(t, LocateResource(snap, updatedResourceURN), 1)
+	})
 }

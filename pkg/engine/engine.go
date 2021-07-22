@@ -17,12 +17,12 @@ package engine
 import (
 	"github.com/opentracing/opentracing-go"
 
-	"github.com/pulumi/pulumi/pkg/resource/deploy"
-	"github.com/pulumi/pulumi/pkg/util/cancel"
-	"github.com/pulumi/pulumi/pkg/workspace"
+	"github.com/pulumi/pulumi/pkg/v3/resource/deploy"
+	"github.com/pulumi/pulumi/pkg/v3/util/cancel"
+	"github.com/pulumi/pulumi/sdk/v3/go/common/workspace"
 )
 
-// UpdateInfo abstracts away information about an apply, preview, or destroy.
+// UpdateInfo handles information common to resource operations (update, preview, destroy, import, refresh).
 type UpdateInfo interface {
 	// GetRoot returns the root directory for this update. This defines the scope for any filesystem resources
 	// accessed by this update.
@@ -33,6 +33,16 @@ type UpdateInfo interface {
 	// GetTarget returns information about the target of this update. This includes the name of the stack being
 	// updated, the configuration values associated with the target and the target's latest snapshot.
 	GetTarget() *deploy.Target
+}
+
+// QueryInfo handles information common to query operations (list, watch).
+type QueryInfo interface {
+	// GetRoot returns the root directory for this update. This defines the scope for any filesystem resources
+	// accessed by this update.
+	GetRoot() string
+	// GetProject returns information about the project associated with this update. This includes information such as
+	// the runtime that will be used to execute the Pulumi program and the program's relative working directory.
+	GetProject() *workspace.Project
 }
 
 // Context provides cancellation, termination, and eventing options for an engine operation. It also provides

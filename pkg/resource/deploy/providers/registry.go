@@ -19,15 +19,15 @@ import (
 	"sync"
 
 	"github.com/blang/semver"
+	uuid "github.com/gofrs/uuid"
 	"github.com/pkg/errors"
-	uuid "github.com/satori/go.uuid"
 
-	"github.com/pulumi/pulumi/pkg/resource"
-	"github.com/pulumi/pulumi/pkg/resource/plugin"
-	"github.com/pulumi/pulumi/pkg/tokens"
-	"github.com/pulumi/pulumi/pkg/util/contract"
-	"github.com/pulumi/pulumi/pkg/util/logging"
-	"github.com/pulumi/pulumi/pkg/workspace"
+	"github.com/pulumi/pulumi/sdk/v3/go/common/resource"
+	"github.com/pulumi/pulumi/sdk/v3/go/common/resource/plugin"
+	"github.com/pulumi/pulumi/sdk/v3/go/common/tokens"
+	"github.com/pulumi/pulumi/sdk/v3/go/common/util/contract"
+	"github.com/pulumi/pulumi/sdk/v3/go/common/util/logging"
+	"github.com/pulumi/pulumi/sdk/v3/go/common/workspace"
 )
 
 // GetProviderVersion fetches and parses a provider version from the given property map. If the version property is not
@@ -184,6 +184,13 @@ func (r *Registry) label() string {
 	return "ProviderRegistry"
 }
 
+// GetSchema returns the JSON-serialized schema for the provider.
+func (r *Registry) GetSchema(version int) ([]byte, error) {
+	contract.Fail()
+
+	return nil, errors.New("the provider registry has no schema")
+}
+
 // CheckConfig validates the configuration for this resource provider.
 func (r *Registry) CheckConfig(urn resource.URN, olds,
 	news resource.PropertyMap, allowUnknowns bool) (resource.PropertyMap, []plugin.CheckFailure, error) {
@@ -241,16 +248,6 @@ func (r *Registry) Check(urn resource.URN, olds, news resource.PropertyMap,
 		return nil, failures, err
 	}
 
-	// If we are running a preview, configure the provider now. If we are not running a preview, we will configure the
-	// provider when it is created or updated.
-	if r.isPreview {
-		if err := provider.Configure(inputs); err != nil {
-			closeErr := r.host.CloseProvider(provider)
-			contract.IgnoreError(closeErr)
-			return nil, nil, err
-		}
-	}
-
 	// Create a provider reference using the URN and the unknown ID and register the provider.
 	r.setProvider(mustNewReference(urn, UnknownID), provider)
 
@@ -288,16 +285,18 @@ func (r *Registry) Diff(urn resource.URN, id resource.ID, olds, news resource.Pr
 	if err != nil {
 		return plugin.DiffResult{Changes: plugin.DiffUnknown}, err
 	}
+	if diff.Changes == plugin.DiffUnknown {
+		if olds.DeepEquals(news) {
+			diff.Changes = plugin.DiffNone
+		} else {
+			diff.Changes = plugin.DiffSome
+		}
+	}
 
 	// If the diff requires replacement, unload the provider: the engine will reload it during its replacememnt Check.
-	//
-	// If the diff does not require replacement and we are running a preview, register it under its current ID so that
-	// references to the provider from other resources will resolve properly.
-	if len(diff.ReplaceKeys) != 0 {
+	if diff.Replace() {
 		closeErr := r.host.CloseProvider(provider)
 		contract.IgnoreError(closeErr)
-	} else if r.isPreview {
-		r.setProvider(mustNewReference(urn, id), provider)
 	}
 
 	return diff, nil
@@ -307,10 +306,8 @@ func (r *Registry) Diff(urn resource.URN, id resource.ID, olds, news resource.Pr
 // registers it under the assigned (URN, ID).
 //
 // The provider must have been loaded by a prior call to Check.
-func (r *Registry) Create(urn resource.URN,
-	news resource.PropertyMap, timeout float64) (resource.ID, resource.PropertyMap, resource.Status, error) {
-
-	contract.Assert(!r.isPreview)
+func (r *Registry) Create(urn resource.URN, news resource.PropertyMap, timeout float64,
+	preview bool) (resource.ID, resource.PropertyMap, resource.Status, error) {
 
 	label := fmt.Sprintf("%s.Create(%s)", r.label(), urn)
 	logging.V(7).Infof("%s executing (#news=%v)", label, len(news))
@@ -323,8 +320,16 @@ func (r *Registry) Create(urn resource.URN,
 		return "", nil, resource.StatusOK, err
 	}
 
-	id := resource.ID(uuid.NewV4().String())
-	contract.Assert(id != UnknownID)
+	var id resource.ID
+	if !preview {
+		// generate a new uuid
+		uuid, err := uuid.NewV4()
+		if err != nil {
+			return "", nil, resource.StatusOK, err
+		}
+		id = resource.ID(uuid.String())
+		contract.Assert(id != UnknownID)
+	}
 
 	r.setProvider(mustNewReference(urn, id), provider)
 	return id, news, resource.StatusOK, nil
@@ -334,10 +339,8 @@ func (r *Registry) Create(urn resource.URN,
 // reference indicated by the (URN, ID) pair.
 //
 // THe provider must have been loaded by a prior call to Check.
-func (r *Registry) Update(urn resource.URN, id resource.ID, olds, news resource.PropertyMap,
-	timeout float64, ignoreChanges []string) (resource.PropertyMap, resource.Status, error) {
-
-	contract.Assert(!r.isPreview)
+func (r *Registry) Update(urn resource.URN, id resource.ID, olds, news resource.PropertyMap, timeout float64,
+	ignoreChanges []string, preview bool) (resource.PropertyMap, resource.Status, error) {
 
 	label := fmt.Sprintf("%s.Update(%s,%s)", r.label(), id, urn)
 	logging.V(7).Infof("%s executing (#olds=%v,#news=%v)", label, len(olds), len(news))
@@ -375,6 +378,11 @@ func (r *Registry) Read(urn resource.URN, id resource.ID,
 	return plugin.ReadResult{}, resource.StatusUnknown, errors.New("provider resources may not be read")
 }
 
+func (r *Registry) Construct(info plugin.ConstructInfo, typ tokens.Type, name tokens.QName, parent resource.URN,
+	inputs resource.PropertyMap, options plugin.ConstructOptions) (plugin.ConstructResult, error) {
+	return plugin.ConstructResult{}, errors.New("provider resources may not be constructed")
+}
+
 func (r *Registry) Invoke(tok tokens.ModuleMember,
 	args resource.PropertyMap) (resource.PropertyMap, []plugin.CheckFailure, error) {
 
@@ -382,6 +390,22 @@ func (r *Registry) Invoke(tok tokens.ModuleMember,
 	// registry.
 	contract.Fail()
 	return nil, nil, errors.New("the provider registry is not invokable")
+}
+
+func (r *Registry) StreamInvoke(
+	tok tokens.ModuleMember, args resource.PropertyMap,
+	onNext func(resource.PropertyMap) error) ([]plugin.CheckFailure, error) {
+
+	return nil, fmt.Errorf("the provider registry does not implement streaming invokes")
+}
+
+func (r *Registry) Call(tok tokens.ModuleMember, args resource.PropertyMap, info plugin.CallInfo,
+	options plugin.CallOptions) (plugin.CallResult, error) {
+
+	// It is the responsibility of the eval source to ensure that we never attempt an call using the provider
+	// registry.
+	contract.Fail()
+	return plugin.CallResult{}, errors.New("the provider registry is not callable")
 }
 
 func (r *Registry) GetPluginInfo() (workspace.PluginInfo, error) {

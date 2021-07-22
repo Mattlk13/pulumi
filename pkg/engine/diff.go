@@ -25,18 +25,12 @@ import (
 
 	"github.com/sergi/go-diff/diffmatchpatch"
 
-	"github.com/pulumi/pulumi/pkg/diag/colors"
-	"github.com/pulumi/pulumi/pkg/resource"
-	"github.com/pulumi/pulumi/pkg/resource/deploy"
-	"github.com/pulumi/pulumi/pkg/resource/deploy/providers"
-	"github.com/pulumi/pulumi/pkg/util/contract"
+	"github.com/pulumi/pulumi/pkg/v3/resource/deploy"
+	"github.com/pulumi/pulumi/pkg/v3/resource/deploy/providers"
+	"github.com/pulumi/pulumi/sdk/v3/go/common/diag/colors"
+	"github.com/pulumi/pulumi/sdk/v3/go/common/resource"
+	"github.com/pulumi/pulumi/sdk/v3/go/common/util/contract"
 )
-
-// IsInternalPropertyKey returns true if the given property key is an internal key that should not be displayed to
-// users.
-func IsInternalPropertyKey(key resource.PropertyKey) bool {
-	return strings.HasPrefix(string(key), "__")
-}
 
 // GetIndent computes a step's parent indentation.
 func GetIndent(step StepEventMetadata, seen map[resource.URN]StepEventMetadata) int {
@@ -231,9 +225,86 @@ func PrintObject(
 
 	// Now print out the values intelligently based on the type.
 	for _, k := range keys {
-		if v := props[k]; !IsInternalPropertyKey(k) && shouldPrintPropertyValue(v, planning) {
+		if v := props[k]; !resource.IsInternalPropertyKey(k) && shouldPrintPropertyValue(v, planning) {
 			printPropertyTitle(b, string(k), maxkey, indent, op, prefix)
 			printPropertyValue(b, v, planning, indent, op, prefix, debug)
+		}
+	}
+}
+
+func PrintResourceReference(
+	b *bytes.Buffer, resRef resource.ResourceReference, planning bool,
+	indent int, op deploy.StepOp, prefix bool, debug bool) {
+
+	printPropertyTitle(b, "URN", 3, indent, op, prefix)
+	write(b, op, "%q\n", resRef.URN)
+	printPropertyTitle(b, "ID", 3, indent, op, prefix)
+	printPropertyValue(b, resRef.ID, planning, indent, op, prefix, debug)
+	printPropertyTitle(b, "PackageVersion", 3, indent, op, prefix)
+	write(b, op, "%q\n", resRef.PackageVersion)
+}
+
+func massageStackPreviewAdd(p resource.PropertyValue) resource.PropertyValue {
+	switch {
+	case p.IsArray():
+		arr := make([]resource.PropertyValue, len(p.ArrayValue()))
+		for i, v := range p.ArrayValue() {
+			arr[i] = massageStackPreviewAdd(v)
+		}
+		return resource.NewArrayProperty(arr)
+	case p.IsObject():
+		obj := resource.PropertyMap{}
+		for k, v := range p.ObjectValue() {
+			if k != "@isPulumiResource" {
+				obj[k] = massageStackPreviewAdd(v)
+			}
+		}
+		return resource.NewObjectProperty(obj)
+	default:
+		return p
+	}
+}
+
+func massageStackPreviewDiff(diff resource.ValueDiff, inResource bool) {
+	switch {
+	case diff.Array != nil:
+		for i, p := range diff.Array.Adds {
+			diff.Array.Adds[i] = massageStackPreviewAdd(p)
+		}
+		for _, d := range diff.Array.Updates {
+			massageStackPreviewDiff(d, inResource)
+		}
+	case diff.Object != nil:
+		massageStackPreviewOutputDiff(diff.Object, inResource)
+	}
+}
+
+// massageStackPreviewOutputDiff removes any adds of unknown values nested inside Pulumi resources present in a stack's
+// outputs.
+func massageStackPreviewOutputDiff(diff *resource.ObjectDiff, inResource bool) {
+	if diff == nil {
+		return
+	}
+
+	_, isResource := diff.Adds["@isPulumiResource"]
+	if isResource {
+		delete(diff.Adds, "@isPulumiResource")
+
+		for k, v := range diff.Adds {
+			if v.IsComputed() {
+				delete(diff.Adds, k)
+			}
+		}
+	}
+
+	for i, p := range diff.Adds {
+		diff.Adds[i] = massageStackPreviewAdd(p)
+	}
+	for k, d := range diff.Updates {
+		if isResource && d.New.IsComputed() && !shouldPrintPropertyValue(d.Old, false) {
+			delete(diff.Updates, k)
+		} else {
+			massageStackPreviewDiff(d, inResource)
 		}
 	}
 }
@@ -241,22 +312,35 @@ func PrintObject(
 // GetResourceOutputsPropertiesString prints only those properties that either differ from the input properties or, if
 // there is an old snapshot of the resource, differ from the prior old snapshot's output properties.
 func GetResourceOutputsPropertiesString(
-	step StepEventMetadata, indent int, planning bool, debug bool, refresh bool) string {
-	// We should only print outputs if the outputs are known to be complete. This will be the case if we are
+	step StepEventMetadata, indent int, planning, debug, refresh, showSames bool) string {
+
+	// During the actual update we always show all the outputs for the stack, even if they are unchanged.
+	if !showSames && !planning && step.URN.Type() == resource.RootStackType {
+		showSames = true
+	}
+
+	// We should only print outputs for normal resources if the outputs are known to be complete.
+	// This will be the case if we are:
+	//
 	//   1) not doing a preview
 	//   2) doing a refresh
 	//   3) doing a read
 	//   4) doing an import
 	//
-	// Technically, 2-4 are the same, since they're all bottoming out at a provider's implementation of Read, but
-	// the upshot is that either way we're ending up with outputs that are exactly accurate. If we are not sure that we
-	// are in one of the above states, we shouldn't try to print outputs.
+	// Technically, 2-4 are the same, since they're all bottoming out at a provider's implementation
+	// of Read, but the upshot is that either way we're ending up with outputs that are exactly
+	// accurate. If we are not sure that we are in one of the above states, we shouldn't try to
+	// print outputs.
+	//
+	// Note: we always show the outputs for the stack itself.  These are valuable enough to want
+	// to always see.
 	if planning {
 		printOutputDuringPlanning := refresh ||
 			step.Op == deploy.OpRead ||
 			step.Op == deploy.OpReadReplacement ||
 			step.Op == deploy.OpImport ||
-			step.Op == deploy.OpImportReplacement
+			step.Op == deploy.OpImportReplacement ||
+			step.URN.Type() == resource.RootStackType
 		if !printOutputDuringPlanning {
 			return ""
 		}
@@ -268,24 +352,34 @@ func GetResourceOutputsPropertiesString(
 		return ""
 	}
 
-	b := &bytes.Buffer{}
-
 	// Only certain kinds of steps have output properties associated with them.
-	new := step.New
-	if new == nil || new.Outputs == nil {
-		return ""
+	var ins resource.PropertyMap
+	var outs resource.PropertyMap
+	if step.New == nil || step.New.Outputs == nil {
+		ins = make(resource.PropertyMap)
+		outs = make(resource.PropertyMap)
+	} else {
+		ins = step.New.Inputs
+		outs = step.New.Outputs
 	}
 	op := step.Op
-
-	// First fetch all the relevant property maps that we may consult.
-	ins := new.Inputs
-	outs := new.Outputs
 
 	// If there was an old state associated with this step, we may have old outputs. If we do, and if they differ from
 	// the new outputs, we want to print the diffs.
 	var outputDiff *resource.ObjectDiff
 	if step.Old != nil && step.Old.Outputs != nil {
-		outputDiff = step.Old.Outputs.Diff(outs, IsInternalPropertyKey)
+		outputDiff = step.Old.Outputs.Diff(outs, resource.IsInternalPropertyKey)
+
+		// If this is the root stack type, we want to strip out any nested resource outputs that are not known if
+		// they have no corresponding output in the old state.
+		if planning && step.URN.Type() == resource.RootStackType {
+			massageStackPreviewOutputDiff(outputDiff, false)
+		}
+	}
+
+	// If we asked to not show-sames, and no outputs changed then don't show anything at all here.
+	if outputDiff == nil && !showSames {
+		return ""
 	}
 
 	var keys []resource.PropertyKey
@@ -296,6 +390,8 @@ func GetResourceOutputsPropertiesString(
 	}
 	maxkey := maxKey(keys)
 
+	b := &bytes.Buffer{}
+
 	// Now sort the keys and enumerate each output property in a deterministic order.
 	for _, k := range keys {
 		out := outs[k]
@@ -304,19 +400,24 @@ func GetResourceOutputsPropertiesString(
 		// - a property with the same key is not present in the inputs
 		// - the property that is present in the inputs is different
 		// - we are doing a refresh, in which case we always want to show state differences
-		if outputDiff != nil || (!IsInternalPropertyKey(k) && shouldPrintPropertyValue(out, true)) {
-			print := true
+		if outputDiff != nil || (!resource.IsInternalPropertyKey(k) && shouldPrintPropertyValue(out, true)) {
 			if in, has := ins[k]; has && !refresh {
-				print = (out.Diff(in, IsInternalPropertyKey) != nil)
+				if out.Diff(in, resource.IsInternalPropertyKey) == nil {
+					continue
+				}
 			}
 
-			if print {
-				if outputDiff != nil {
-					printObjectPropertyDiff(b, k, maxkey, *outputDiff, planning, indent, false, debug)
-				} else {
-					printPropertyTitle(b, string(k), maxkey, indent, op, false)
-					printPropertyValue(b, out, planning, indent, op, false, debug)
-				}
+			// If we asked to not show-sames, and this is a same output, then filter it out of what
+			// we display.
+			if !showSames && outputDiff != nil && outputDiff.Same(k) {
+				continue
+			}
+
+			if outputDiff != nil {
+				printObjectPropertyDiff(b, k, maxkey, *outputDiff, planning, indent, false, debug)
+			} else {
+				printPropertyTitle(b, string(k), maxkey, indent, op, false)
+				printPropertyValue(b, out, planning, indent, op, false, debug)
 			}
 		}
 	}
@@ -364,9 +465,10 @@ func printPropertyValue(
 	b *bytes.Buffer, v resource.PropertyValue, planning bool,
 	indent int, op deploy.StepOp, prefix bool, debug bool) {
 
-	if isPrimitive(v) {
+	switch {
+	case isPrimitive(v) || v.IsSecret():
 		printPrimitivePropertyValue(b, v, planning, op)
-	} else if v.IsArray() {
+	case v.IsArray():
 		arr := v.ArrayValue()
 		if len(arr) == 0 {
 			writeVerbatim(b, op, "[]")
@@ -378,7 +480,7 @@ func printPropertyValue(
 			}
 			writeWithIndentNoPrefix(b, indent, op, "]")
 		}
-	} else if v.IsAsset() {
+	case v.IsAsset():
 		a := v.AssetValue()
 		if a.IsText() {
 			write(b, op, "asset(text:%s) {\n", shortHash(a.Hash))
@@ -399,7 +501,7 @@ func printPropertyValue(
 			contract.Assert(a.IsURI())
 			write(b, op, "asset(uri:%s) { %s }", shortHash(a.Hash), a.URI)
 		}
-	} else if v.IsArchive() {
+	case v.IsArchive():
 		a := v.ArchiveValue()
 		if assets, has := a.GetAssets(); has {
 			write(b, op, "archive(assets:%s) {\n", shortHash(a.Hash))
@@ -418,8 +520,7 @@ func printPropertyValue(
 			contract.Assert(a.IsURI())
 			write(b, op, "archive(uri:%s) { %v }", shortHash(a.Hash), a.URI)
 		}
-	} else {
-		contract.Assert(v.IsObject())
+	case v.IsObject():
 		obj := v.ObjectValue()
 		if len(obj) == 0 {
 			writeVerbatim(b, op, "{}")
@@ -428,6 +529,13 @@ func printPropertyValue(
 			PrintObject(b, obj, planning, indent+1, op, prefix, debug)
 			writeWithIndentNoPrefix(b, indent, op, "}")
 		}
+	case v.IsResourceReference():
+		resRef := v.ResourceReferenceValue()
+		writeVerbatim(b, op, "{\n")
+		PrintResourceReference(b, resRef, planning, indent+1, op, prefix, debug)
+		writeWithIndentNoPrefix(b, indent, op, "}")
+	default:
+		contract.Failf("Unknown PropertyValue type %v", v)
 	}
 	writeVerbatim(b, op, "\n")
 }
@@ -463,7 +571,7 @@ func printOldNewDiffs(
 	planning bool, indent int, op deploy.StepOp, summary bool, debug bool) {
 
 	// Get the full diff structure between the two, and print it (recursively).
-	if diff := olds.Diff(news, IsInternalPropertyKey); diff != nil {
+	if diff := olds.Diff(news, resource.IsInternalPropertyKey); diff != nil {
 		PrintObjectDiff(b, *diff, include, planning, indent, summary, debug)
 	} else {
 		// If there's no diff, report the op as Same - there's no diff to render
@@ -621,7 +729,7 @@ func printPrimitivePropertyValue(b io.StringWriter, v resource.PropertyValue, pl
 			write(b, op, "undefined")
 		}
 	} else {
-		contract.Failf("Unexpected property value kind")
+		contract.Failf("Unexpected property value kind '%v'", v)
 	}
 }
 

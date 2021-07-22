@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+import * as grpc from "@grpc/grpc-js";
+
 import { Resource } from "./resource";
 import * as utils from "./utils";
 
@@ -23,8 +25,8 @@ import * as utils from "./utils";
  */
 export class RunError extends Error {
     /**
-     * @internal
      * A private field to help with RTTI that works in SxS scenarios.
+     * @internal
      */
     // tslint:disable-next-line:variable-name
     public readonly __pulumiRunError: boolean = true;
@@ -50,8 +52,8 @@ export class RunError extends Error {
  */
 export class ResourceError extends Error {
     /**
-     * @internal
      * A private field to help with RTTI that works in SxS scenarios.
+     * @internal
      */
     // tslint:disable-next-line:variable-name
     public readonly __pulumResourceError: boolean = true;
@@ -67,4 +69,9 @@ export class ResourceError extends Error {
     constructor(message: string, public resource: Resource | undefined, public hideStack?: boolean) {
         super(message);
     }
+}
+
+export function isGrpcError(err: Error): boolean {
+    const code = (<any>err).code;
+    return code === grpc.status.UNAVAILABLE || code === grpc.status.CANCELLED;
 }

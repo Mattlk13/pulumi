@@ -16,13 +16,11 @@ package engine
 
 import (
 	"os"
-	"path"
 	"path/filepath"
-	"strings"
 
 	"github.com/pkg/errors"
 
-	"github.com/pulumi/pulumi/pkg/workspace"
+	"github.com/pulumi/pulumi/sdk/v3/go/common/workspace"
 )
 
 type Projinfo struct {
@@ -32,21 +30,29 @@ type Projinfo struct {
 
 // GetPwdMain returns the working directory and main entrypoint to use for this package.
 func (projinfo *Projinfo) GetPwdMain() (string, string, error) {
-	pwd := projinfo.Root
-	main := projinfo.Proj.Main
+	return getPwdMain(projinfo.Root, projinfo.Proj.Main)
+}
+
+type PolicyPackInfo struct {
+	Proj *workspace.PolicyPackProject
+	Root string
+}
+
+// GetPwdMain returns the working directory and main entrypoint to use for this package.
+func (projinfo *PolicyPackInfo) GetPwdMain() (string, string, error) {
+	return getPwdMain(projinfo.Root, projinfo.Proj.Main)
+}
+
+func getPwdMain(root, main string) (string, string, error) {
+	pwd := root
 	if main == "" {
 		main = "."
 	} else {
-		// The path must be relative from the package root.
-		if filepath.IsAbs(main) {
-			return "", "", errors.New("project 'main' must be a relative path")
-		}
 
-		// Check that main is a subdirectory.
-		cleanPwd := filepath.Clean(pwd)
-		main = filepath.Clean(path.Join(cleanPwd, main))
-		if !strings.HasPrefix(main, cleanPwd) {
-			return "", "", errors.New("project 'main' must be a subfolder")
+		// The path can be relative from the package root.
+		if !filepath.IsAbs(main) {
+			cleanPwd := filepath.Clean(pwd)
+			main = filepath.Clean(filepath.Join(cleanPwd, main))
 		}
 
 		// So that any relative paths inside of the program are correct, we still need to pass the pwd

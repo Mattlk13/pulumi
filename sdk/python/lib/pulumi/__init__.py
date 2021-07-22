@@ -18,9 +18,6 @@ providers and libraries in the Pulumi ecosystem use to create and manage
 resources.
 """
 
-# Make subpackages available.
-__all__ = ['runtime', 'dynamic']
-
 # Make all module members inside of this package available as package members.
 from .asset import (
     Asset,
@@ -56,18 +53,25 @@ from .resource import (
     Alias,
     Resource,
     CustomResource,
+    CustomTimeouts,
     ComponentResource,
     ProviderResource,
     ResourceOptions,
     create_urn,
     export,
     ROOT_STACK_RESOURCE,
+    ResourceTransformation,
+    ResourceTransformationArgs,
+    ResourceTransformationResult,
 )
 
 from .output import (
     Output,
     Input,
     Inputs,
+    InputType,
+    UNKNOWN,
+    contains_unknowns,
 )
 
 from .log import (
@@ -80,3 +84,90 @@ from .log import (
 from .stack_reference import (
     StackReference,
 )
+
+# pylint: disable=redefined-builtin
+from ._types import (
+    MISSING,
+    input_type,
+    output_type,
+    property,
+    getter,
+    get,
+    set,
+)
+
+from . import runtime, dynamic, policy, automation
+
+__all__ = [
+    # asset
+    "Asset",
+    "Archive",
+    "AssetArchive",
+    "FileArchive",
+    "FileAsset",
+    "RemoteArchive",
+    "RemoteAsset",
+    "StringAsset",
+
+    # config
+    "Config",
+    "ConfigMissingError",
+    "ConfigTypeError",
+
+    # errors
+    "RunError",
+
+    # invoke
+    "InvokeOptions",
+
+    # metadata
+    "get_project",
+    "get_stack",
+
+    # resource
+    "Alias",
+    "Resource",
+    "CustomResource",
+    "CustomTimeouts",
+    "ComponentResource",
+    "ProviderResource",
+    "ResourceOptions",
+    "create_urn",
+    "export",
+    "ROOT_STACK_RESOURCE",
+    "ResourceTransformation",
+    "ResourceTransformationArgs",
+    "ResourceTransformationResult",
+
+    # output
+    "Output",
+    "Input",
+    "Inputs",
+    "InputType",
+    "UNKNOWN",
+    "contains_unknowns",
+
+    # log
+    "debug",
+    "info",
+    "warn",
+    "error",
+
+    # stack_reference
+    "StackReference",
+
+    # _types
+    "MISSING",
+    "input_type",
+    "output_type",
+    "property",
+    "getter",
+    "get",
+    "set",
+
+    # sub-modules
+    "runtime",
+    "dynamic",
+    "policy",
+    "automation"
+]

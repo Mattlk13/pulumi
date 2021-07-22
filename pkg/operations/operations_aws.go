@@ -25,9 +25,9 @@ import (
 	"github.com/aws/aws-sdk-go/service/cloudwatchlogs"
 	"github.com/pkg/errors"
 
-	"github.com/pulumi/pulumi/pkg/resource/config"
-	"github.com/pulumi/pulumi/pkg/tokens"
-	"github.com/pulumi/pulumi/pkg/util/logging"
+	"github.com/pulumi/pulumi/sdk/v3/go/common/resource/config"
+	"github.com/pulumi/pulumi/sdk/v3/go/common/tokens"
+	"github.com/pulumi/pulumi/sdk/v3/go/common/util/logging"
 )
 
 // TODO[pulumi/pulumi#54] This should be factored out behind an OperationsProvider RPC interface and versioned with the
@@ -97,27 +97,15 @@ func (ops *awsOpsProvider) GetLogs(query LogQuery) (*[]LogEntry, error) {
 	switch state.Type {
 	case awsFunctionType:
 		functionName := state.Outputs["name"].StringValue()
-		rawLogs := ops.awsConnection.getLogsForLogGroupsConcurrently(
+		logResult := ops.awsConnection.getLogsForLogGroupsConcurrently(
 			[]string{functionName},
 			[]string{"/aws/lambda/" + functionName},
 			query.StartTime,
 			query.EndTime,
 		)
-		sort.SliceStable(rawLogs, func(i, j int) bool { return rawLogs[i].Timestamp < rawLogs[j].Timestamp })
-		logging.V(5).Infof("GetLogs[%v] produced %d raw-logs", state.URN, len(rawLogs))
-
-		name := string(state.URN.Name())
-
-		var logs []LogEntry
-		for _, rawLog := range rawLogs {
-			extractedLog := extractLambdaLogMessage(rawLog.Message, name)
-			if extractedLog != nil {
-				logs = append(logs, *extractedLog)
-			}
-		}
-		logging.V(5).Infof("GetLogs[%v] return %d logs", state.URN, len(logs))
-
-		return &logs, nil
+		sort.SliceStable(logResult, func(i, j int) bool { return logResult[i].Timestamp < logResult[j].Timestamp })
+		logging.V(5).Infof("GetLogs[%v] return %d logs", state.URN, len(logResult))
+		return &logResult, nil
 	case awsLogGroupType:
 		name := state.Outputs["name"].StringValue()
 		logResult := ops.awsConnection.getLogsForLogGroupsConcurrently(

@@ -3,29 +3,33 @@ package deploy
 import (
 	"context"
 	"fmt"
+	"sort"
 
+	uuid "github.com/gofrs/uuid"
 	"github.com/pkg/errors"
-	uuid "github.com/satori/go.uuid"
 
-	"github.com/pulumi/pulumi/pkg/resource"
-	"github.com/pulumi/pulumi/pkg/resource/plugin"
-	"github.com/pulumi/pulumi/pkg/tokens"
-	"github.com/pulumi/pulumi/pkg/util/contract"
-	"github.com/pulumi/pulumi/pkg/workspace"
+	"github.com/pulumi/pulumi/sdk/v3/go/common/resource"
+	"github.com/pulumi/pulumi/sdk/v3/go/common/resource/plugin"
+	"github.com/pulumi/pulumi/sdk/v3/go/common/tokens"
+	"github.com/pulumi/pulumi/sdk/v3/go/common/util/contract"
+	"github.com/pulumi/pulumi/sdk/v3/go/common/workspace"
 )
 
 type builtinProvider struct {
+	context context.Context
+	cancel  context.CancelFunc
+
 	backendClient BackendClient
-	context       context.Context
-	cancel        context.CancelFunc
+	resources     *resourceMap
 }
 
-func newBuiltinProvider(backendClient BackendClient) *builtinProvider {
+func newBuiltinProvider(backendClient BackendClient, resources *resourceMap) *builtinProvider {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &builtinProvider{
-		backendClient: backendClient,
 		context:       ctx,
 		cancel:        cancel,
+		backendClient: backendClient,
+		resources:     resources,
 	}
 }
 
@@ -35,6 +39,11 @@ func (p *builtinProvider) Close() error {
 
 func (p *builtinProvider) Pkg() tokens.Package {
 	return "pulumi"
+}
+
+// GetSchema returns the JSON-serialized schema for the provider.
+func (p *builtinProvider) GetSchema(version int) ([]byte, error) {
+	return []byte("{}"), nil
 }
 
 // CheckConfig validates the configuration for this resource provider.
@@ -96,8 +105,8 @@ func (p *builtinProvider) Diff(urn resource.URN, id resource.ID, state, inputs r
 	return plugin.DiffResult{Changes: plugin.DiffNone}, nil
 }
 
-func (p *builtinProvider) Create(urn resource.URN,
-	inputs resource.PropertyMap, timeout float64) (resource.ID, resource.PropertyMap, resource.Status, error) {
+func (p *builtinProvider) Create(urn resource.URN, inputs resource.PropertyMap, timeout float64,
+	preview bool) (resource.ID, resource.PropertyMap, resource.Status, error) {
 
 	contract.Assert(urn.Type() == stackReferenceType)
 
@@ -105,12 +114,22 @@ func (p *builtinProvider) Create(urn resource.URN,
 	if err != nil {
 		return "", nil, resource.StatusUnknown, err
 	}
-	id := resource.ID(uuid.NewV4().String())
+
+	var id resource.ID
+	if !preview {
+		// generate a new uuid
+		uuid, err := uuid.NewV4()
+		if err != nil {
+			return "", nil, resource.StatusOK, err
+		}
+		id = resource.ID(uuid.String())
+	}
+
 	return id, state, resource.StatusOK, nil
 }
 
-func (p *builtinProvider) Update(urn resource.URN, id resource.ID, state, inputs resource.PropertyMap,
-	timeout float64, ignoreChanges []string) (resource.PropertyMap, resource.Status, error) {
+func (p *builtinProvider) Update(urn resource.URN, id resource.ID, state, inputs resource.PropertyMap, timeout float64,
+	ignoreChanges []string, preview bool) (resource.PropertyMap, resource.Status, error) {
 
 	contract.Failf("unexpected update for builtin resource %v", urn)
 	contract.Assert(urn.Type() == stackReferenceType)
@@ -142,20 +161,53 @@ func (p *builtinProvider) Read(urn resource.URN, id resource.ID,
 	}, resource.StatusOK, nil
 }
 
+func (p *builtinProvider) Construct(info plugin.ConstructInfo, typ tokens.Type, name tokens.QName, parent resource.URN,
+	inputs resource.PropertyMap, options plugin.ConstructOptions) (plugin.ConstructResult, error) {
+	return plugin.ConstructResult{}, errors.New("builtin resources may not be constructed")
+}
+
+const readStackOutputs = "pulumi:pulumi:readStackOutputs"
 const readStackResourceOutputs = "pulumi:pulumi:readStackResourceOutputs"
+const getResource = "pulumi:pulumi:getResource"
 
 func (p *builtinProvider) Invoke(tok tokens.ModuleMember,
 	args resource.PropertyMap) (resource.PropertyMap, []plugin.CheckFailure, error) {
-	if tok != readStackResourceOutputs {
+
+	switch tok {
+	case readStackOutputs:
+		outs, err := p.readStackReference(args)
+		if err != nil {
+			return nil, nil, err
+		}
+		return outs, nil, nil
+	case readStackResourceOutputs:
+		outs, err := p.readStackResourceOutputs(args)
+		if err != nil {
+			return nil, nil, err
+		}
+		return outs, nil, nil
+	case getResource:
+		outs, err := p.getResource(args)
+		if err != nil {
+			return nil, nil, err
+		}
+		return outs, nil, nil
+	default:
 		return nil, nil, errors.Errorf("unrecognized function name: '%v'", tok)
 	}
+}
 
-	outs, err := p.readStackResourceOutputs(args)
-	if err != nil {
-		return nil, nil, err
-	}
+func (p *builtinProvider) StreamInvoke(
+	tok tokens.ModuleMember, args resource.PropertyMap,
+	onNext func(resource.PropertyMap) error) ([]plugin.CheckFailure, error) {
 
-	return outs, nil, nil
+	return nil, fmt.Errorf("the builtin provider does not implement streaming invokes")
+}
+
+func (p *builtinProvider) Call(tok tokens.ModuleMember, args resource.PropertyMap, info plugin.CallInfo,
+	options plugin.CallOptions) (plugin.CallResult, error) {
+
+	return plugin.CallResult{}, fmt.Errorf("the builtin provider does not implement call")
 }
 
 func (p *builtinProvider) GetPluginInfo() (workspace.PluginInfo, error) {
@@ -189,10 +241,15 @@ func (p *builtinProvider) readStackReference(inputs resource.PropertyMap) (resou
 		}
 	}
 
+	// Sort the secret outputs so the order is deterministic, to avoid spurious diffs during updates.
+	sort.Slice(secretOutputs, func(i, j int) bool {
+		return secretOutputs[i].String() < secretOutputs[j].String()
+	})
+
 	return resource.PropertyMap{
-		"name":          name,
-		"outputs":       resource.NewObjectProperty(outputs),
-		"secretOutputs": resource.NewArrayProperty(secretOutputs),
+		"name":              name,
+		"outputs":           resource.NewObjectProperty(outputs),
+		"secretOutputNames": resource.NewArrayProperty(secretOutputs),
 	}, nil
 }
 
@@ -213,5 +270,22 @@ func (p *builtinProvider) readStackResourceOutputs(inputs resource.PropertyMap) 
 	return resource.PropertyMap{
 		"name":    name,
 		"outputs": resource.NewObjectProperty(outputs),
+	}, nil
+}
+
+func (p *builtinProvider) getResource(inputs resource.PropertyMap) (resource.PropertyMap, error) {
+	urn, ok := inputs["urn"]
+	contract.Assert(ok)
+	contract.Assert(urn.IsString())
+
+	state, ok := p.resources.get(resource.URN(urn.StringValue()))
+	if !ok {
+		return nil, errors.Errorf("unknown resource %v", urn.StringValue())
+	}
+
+	return resource.PropertyMap{
+		"urn":   urn,
+		"id":    resource.NewStringProperty(string(state.ID)),
+		"state": resource.NewObjectProperty(state.Outputs),
 	}, nil
 }

@@ -24,21 +24,27 @@ import (
 	"strings"
 	"time"
 
-	"github.com/pkg/errors"
+	"github.com/pulumi/pulumi/sdk/v3/go/common/util/retry"
 
-	"github.com/pulumi/pulumi/pkg/apitype"
-	"github.com/pulumi/pulumi/pkg/backend"
-	"github.com/pulumi/pulumi/pkg/encoding"
-	"github.com/pulumi/pulumi/pkg/resource/config"
-	"github.com/pulumi/pulumi/pkg/resource/deploy"
-	"github.com/pulumi/pulumi/pkg/resource/stack"
-	"github.com/pulumi/pulumi/pkg/secrets"
-	"github.com/pulumi/pulumi/pkg/tokens"
-	"github.com/pulumi/pulumi/pkg/util/cmdutil"
-	"github.com/pulumi/pulumi/pkg/util/contract"
-	"github.com/pulumi/pulumi/pkg/util/fsutil"
-	"github.com/pulumi/pulumi/pkg/util/logging"
-	"github.com/pulumi/pulumi/pkg/workspace"
+	"github.com/pulumi/pulumi/pkg/v3/engine"
+
+	"github.com/pkg/errors"
+	"gocloud.dev/blob"
+	"gocloud.dev/gcerrors"
+
+	"github.com/pulumi/pulumi/pkg/v3/backend"
+	"github.com/pulumi/pulumi/pkg/v3/resource/deploy"
+	"github.com/pulumi/pulumi/pkg/v3/resource/stack"
+	"github.com/pulumi/pulumi/pkg/v3/secrets"
+	"github.com/pulumi/pulumi/sdk/v3/go/common/apitype"
+	"github.com/pulumi/pulumi/sdk/v3/go/common/encoding"
+	"github.com/pulumi/pulumi/sdk/v3/go/common/resource/config"
+	"github.com/pulumi/pulumi/sdk/v3/go/common/tokens"
+	"github.com/pulumi/pulumi/sdk/v3/go/common/util/cmdutil"
+	"github.com/pulumi/pulumi/sdk/v3/go/common/util/contract"
+	"github.com/pulumi/pulumi/sdk/v3/go/common/util/fsutil"
+	"github.com/pulumi/pulumi/sdk/v3/go/common/util/logging"
+	"github.com/pulumi/pulumi/sdk/v3/go/common/workspace"
 )
 
 const DisableCheckpointBackupsEnvVar = "PULUMI_DISABLE_CHECKPOINT_BACKUPS"
@@ -47,6 +53,19 @@ const DisableCheckpointBackupsEnvVar = "PULUMI_DISABLE_CHECKPOINT_BACKUPS"
 // recommended, because it could mean proceeding even in the face of a corrupted checkpoint state file, but can
 // be used as a last resort when a command absolutely must be run.
 var DisableIntegrityChecking bool
+
+type localQuery struct {
+	root string
+	proj *workspace.Project
+}
+
+func (q *localQuery) GetRoot() string {
+	return q.root
+}
+
+func (q *localQuery) GetProject() *workspace.Project {
+	return q.proj
+}
 
 // update is an implementation of engine.Update backed by local state.
 type update struct {
@@ -66,6 +85,12 @@ func (u *update) GetProject() *workspace.Project {
 
 func (u *update) GetTarget() *deploy.Target {
 	return u.target
+}
+
+func (b *localBackend) newQuery(ctx context.Context,
+	op backend.QueryOperation) (engine.QueryInfo, error) {
+
+	return &localQuery{root: op.Root, proj: op.Proj}, nil
 }
 
 func (b *localBackend) newUpdate(stackName tokens.QName, op backend.UpdateOperation) (*update, error) {
@@ -149,13 +174,13 @@ func (b *localBackend) saveStack(name tokens.QName, snap *deploy.Snapshot, sm se
 	if filepath.Ext(file) == "" {
 		file = file + ext
 	}
-	chk, err := stack.SerializeCheckpoint(name, snap, sm)
+	chk, err := stack.SerializeCheckpoint(name, snap, sm, false /* showSecrets */)
 	if err != nil {
 		return "", errors.Wrap(err, "serializaing checkpoint")
 	}
 	byts, err := m.Marshal(chk)
 	if err != nil {
-		return "", errors.Wrap(err, "An IO error occurred during the current operation")
+		return "", errors.Wrap(err, "An IO error occurred while marshalling the checkpoint")
 	}
 
 	// Back up the existing file if it already exists.
@@ -163,7 +188,36 @@ func (b *localBackend) saveStack(name tokens.QName, snap *deploy.Snapshot, sm se
 
 	// And now write out the new snapshot file, overwriting that location.
 	if err = b.bucket.WriteAll(context.TODO(), file, byts, nil); err != nil {
-		return "", errors.Wrap(err, "An IO error occurred during the current operation")
+
+		b.mutex.Lock()
+		defer b.mutex.Unlock()
+
+		// FIXME: Would be nice to make these configurable
+		delay, _ := time.ParseDuration("1s")
+		maxDelay, _ := time.ParseDuration("30s")
+		backoff := 1.2
+
+		// Retry the write 10 times in case of upstream bucket errors
+		_, _, err = retry.Until(context.TODO(), retry.Acceptor{
+			Delay:    &delay,
+			MaxDelay: &maxDelay,
+			Backoff:  &backoff,
+			Accept: func(try int, nextRetryTime time.Duration) (bool, interface{}, error) {
+				// And now write out the new snapshot file, overwriting that location.
+				err := b.bucket.WriteAll(context.TODO(), file, byts, nil)
+				if err != nil {
+					logging.V(7).Infof("Error while writing snapshot to: %s (attempt=%d, error=%s)", file, try, err)
+					if try > 10 {
+						return false, nil, errors.Wrap(err, "An IO error occurred while writing the new snapshot file")
+					}
+					return false, nil, nil
+				}
+				return true, nil, nil
+			},
+		})
+		if err != nil {
+			return "", err
+		}
 	}
 
 	logging.V(7).Infof("Saved stack %s checkpoint to: %s (backup=%s)", name, file, bck)
@@ -171,7 +225,7 @@ func (b *localBackend) saveStack(name tokens.QName, snap *deploy.Snapshot, sm se
 	// And if we are retaining historical checkpoint information, write it out again
 	if cmdutil.IsTruthy(os.Getenv("PULUMI_RETAIN_CHECKPOINTS")) {
 		if err = b.bucket.WriteAll(context.TODO(), fmt.Sprintf("%v.%v", file, time.Now().UnixNano()), byts, nil); err != nil {
-			return "", errors.Wrap(err, "An IO error occurred during the current operation")
+			return "", errors.Wrap(err, "An IO error occurred while writing the new snapshot file")
 		}
 	}
 
@@ -260,31 +314,56 @@ func (b *localBackend) backupDirectory(stack tokens.QName) string {
 
 // getHistory returns locally stored update history. The first element of the result will be
 // the most recent update record.
-func (b *localBackend) getHistory(name tokens.QName) ([]backend.UpdateInfo, error) {
+func (b *localBackend) getHistory(name tokens.QName, pageSize int, page int) ([]backend.UpdateInfo, error) {
 	contract.Require(name != "", "name")
 
 	dir := b.historyDirectory(name)
+	// TODO: we could consider optimizing the list operation using `page` and `pageSize`.
+	// Unfortunately, this is mildly invasive given the gocloud List API.
 	allFiles, err := listBucket(b.bucket, dir)
 	if err != nil {
 		// History doesn't exist until a stack has been updated.
-		if os.IsNotExist(err) {
+		if gcerrors.Code(errors.Cause(err)) == gcerrors.NotFound {
 			return nil, nil
 		}
 		return nil, err
 	}
 
-	var updates []backend.UpdateInfo
+	var historyEntries []*blob.ListObject
 
+	// filter down to just history entries, reversing list to be in most recent order.
 	// listBucket returns the array sorted by file name, but because of how we name files, older updates come before
-	// newer ones. Loop backwards so we added the newest updates to the array we will return first.
+	// newer ones.
 	for i := len(allFiles) - 1; i >= 0; i-- {
 		file := allFiles[i]
 		filepath := file.Key
 
-		// Open all of the history files, ignoring the checkpoints.
+		// ignore checkpoints
 		if !strings.HasSuffix(filepath, ".history.json") {
 			continue
 		}
+
+		historyEntries = append(historyEntries, file)
+	}
+
+	start := 0
+	end := len(historyEntries) - 1
+	if pageSize > 0 {
+		if page < 1 {
+			page = 1
+		}
+		start = (page - 1) * pageSize
+		end = start + pageSize - 1
+		if end > len(historyEntries)-1 {
+			end = len(historyEntries) - 1
+		}
+	}
+
+	var updates []backend.UpdateInfo
+
+	for i := start; i <= end; i++ {
+		file := historyEntries[i]
+		filepath := file.Key
 
 		var update backend.UpdateInfo
 		b, err := b.bucket.ReadAll(context.TODO(), filepath)
@@ -300,6 +379,42 @@ func (b *localBackend) getHistory(name tokens.QName) ([]backend.UpdateInfo, erro
 	}
 
 	return updates, nil
+}
+
+func (b *localBackend) renameHistory(oldName tokens.QName, newName tokens.QName) error {
+	contract.Require(oldName != "", "oldName")
+	contract.Require(newName != "", "newName")
+
+	oldHistory := b.historyDirectory(oldName)
+	newHistory := b.historyDirectory(newName)
+
+	allFiles, err := listBucket(b.bucket, oldHistory)
+	if err != nil {
+		// if there's nothing there, we don't really need to do a rename.
+		if gcerrors.Code(errors.Cause(err)) == gcerrors.NotFound {
+			return nil
+		}
+		return err
+	}
+
+	for _, file := range allFiles {
+		fileName := objectName(file)
+		oldBlob := path.Join(oldHistory, fileName)
+
+		// The filename format is <stack-name>-<timestamp>.[checkpoint|history].json, we need to change
+		// the stack name part but retain the other parts.
+		newFileName := string(newName) + fileName[strings.LastIndex(fileName, "-"):]
+		newBlob := path.Join(newHistory, newFileName)
+
+		if err := b.bucket.Copy(context.TODO(), newBlob, oldBlob, nil); err != nil {
+			return errors.Wrap(err, "copying history file")
+		}
+		if err := b.bucket.Delete(context.TODO(), oldBlob); err != nil {
+			return errors.Wrap(err, "deleting existing history file")
+		}
+	}
+
+	return nil
 }
 
 // addToHistory saves the UpdateInfo and makes a copy of the current Checkpoint file.

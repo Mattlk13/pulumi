@@ -8,26 +8,49 @@ For larger features, we'd appreciate it if you open a [new issue](https://github
 
 To hack on Pulumi, you'll need to get a development environment set up. You'll want to install the following on your machine:
 
-- Go 1.12 or later
-- NodeJS 6.10.X or later
+- Go 1.16
+- NodeJS 10.X.X or later
 - Python 3.6 or later
+- [.NET Core](https://dotnet.microsoft.com/download)
 - [pipenv](https://github.com/pypa/pipenv)
 - [Golangci-lint](https://github.com/golangci/golangci-lint)
 - [Yarn](https://yarnpkg.com/)
 
 ## Getting dependencies on macOS
 
-You can easily get all required dependencies with brew
+You can easily get all required dependencies with brew and npm
 
 ```bash
-brew install node pipenv python@3 typescript yarn pandoc go golangci/tap/golangci-lint
+brew install node pipenv python@3 typescript yarn go@1.13 golangci/tap/golangci-lint pulumi/tap/pulumictl
+curl https://raw.githubusercontent.com/Homebrew/homebrew-cask/0272f0d33f/Casks/dotnet-sdk.rb > dotnet-sdk.rb  # v3.1.0
+brew install --HEAD -s dotnet-sdk.rb
+rm dotnet-sdk.rb
 ```
+
+## Hacking on Pulumi in Gitpod
+
+If you have a web browser, you can get a fully pre-configured Pulumi development environment in one click:
+
+[![Open in Gitpod](https://gitpod.io/button/open-in-gitpod.svg)](https://gitpod.io/#https://github.com/pulumi/pulumi)
 
 ## Make build system
 
 We use `make` as our build system, so you'll want to install that as well, if you don't have it already. We have extremely limited support for doing development on Windows (the bare minimum for us to get Windows validation of `pulumi`) so if you're on windows, we recommend that you use the [Windows Subsystem for Linux](https://docs.microsoft.com/en-us/windows/wsl/install-win10). We'd like to [make this better](https://github.com/pulumi/pulumi/issues/208) so feel free to pitch in if you can.
 
 For historical reasons (which we'd [like to address](https://github.com/pulumi/pulumi/issues/1515)) our build system requires that the folder `/opt/pulumi` exists and is writable by the current user. If you'd like, you can override this location by setting `PULUMI_ROOT` in your environment. The build is known to fail if this doesn't exist, so you'll need to create it first.
+
+```bash
+mkdir /opt/pulumi
+sudo chown <your_user_name>: /opt/pulumi
+export PATH=/opt/pulumi:/opt/pulumi/bin:$PATH
+```
+
+You'll also need to make sure your maximum open file descriptor limit is set to 5000 at a minimum.
+
+```bash
+ulimit -n # to test
+ulimit -n 5000
+```
 
 Across our projects, we try to use a regular set of make targets. The ones you'll care most about are:
 
@@ -58,6 +81,7 @@ is a pretty standard starting point during debugging that will show a fairly com
 ## Submitting a Pull Request
 
 For contributors we use the standard fork based workflow. Fork this repository, create a topic branch, and start hacking away.  When you're ready, make sure you've run the tests (`make travis_pull_request` will run the exact flow we run in CI) and open your PR.
+When adding a changelog entry, please be sure to use `CHANGELOG_PENDING.md` for the entry - we will then be able to ensure your PR gets into the next release.
 
 ## Getting Help
 

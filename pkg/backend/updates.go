@@ -15,9 +15,9 @@
 package backend
 
 import (
-	"github.com/pulumi/pulumi/pkg/apitype"
-	"github.com/pulumi/pulumi/pkg/engine"
-	"github.com/pulumi/pulumi/pkg/resource/config"
+	"github.com/pulumi/pulumi/pkg/v3/engine"
+	"github.com/pulumi/pulumi/sdk/v3/go/common/apitype"
+	"github.com/pulumi/pulumi/sdk/v3/go/common/resource/config"
 )
 
 // UpdateMetadata describes optional metadata about an update.
@@ -70,6 +70,10 @@ const (
 	CISystem = "ci.system"
 	// CIBuildID is an opaque ID of the build in the CI system.
 	CIBuildID = "ci.build.id"
+	// CIBuildNumber is a sequentially incrementing number specific for a project/repo.
+	// This value is only set for CI systems that have separate Build ID and a Build Number.
+	// If this value is blank, use `CIBuildID` always.
+	CIBuildNumer = "ci.build.number"
 	// CIBuildType is the type of build of the CI system, e.g. "push", "pull_request", "test_only".
 	CIBuildType = "ci.build.type"
 	// CIBuildURL is a URL to get more information about the particular CI build.
@@ -81,6 +85,11 @@ const (
 	// CIPRNumber is the PR number, for which the current CI job may be executing.
 	// Combining this information with the `VCSRepoKind` will give us the PR URL.
 	CIPRNumber = "ci.pr.number"
+
+	// ExecutionKind indicates how the update was executed. One of "cli", "auto.local", or "auto.inline".
+	ExecutionKind = "exec.kind"
+	// ExecutionAgent indicates the user agent of the updater for automated scenarios (GHA, Kubernetes Operator).
+	ExecutionAgent = "exec.agent"
 )
 
 // UpdateInfo describes a previous update.
@@ -100,6 +109,7 @@ type UpdateInfo struct {
 	Config config.Map `json:"config"`
 
 	// Information obtained from an update completing.
+	Version         int                    `json:"version"`
 	Result          UpdateResult           `json:"result"`
 	EndTime         int64                  `json:"endTime"`
 	ResourceChanges engine.ResourceChanges `json:"resourceChanges,omitempty"`

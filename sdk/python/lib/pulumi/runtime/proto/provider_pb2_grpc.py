@@ -17,6 +17,11 @@ class ResourceProviderStub(object):
     Args:
       channel: A grpc.Channel.
     """
+    self.GetSchema = channel.unary_unary(
+        '/pulumirpc.ResourceProvider/GetSchema',
+        request_serializer=provider__pb2.GetSchemaRequest.SerializeToString,
+        response_deserializer=provider__pb2.GetSchemaResponse.FromString,
+        )
     self.CheckConfig = channel.unary_unary(
         '/pulumirpc.ResourceProvider/CheckConfig',
         request_serializer=provider__pb2.CheckRequest.SerializeToString,
@@ -36,6 +41,16 @@ class ResourceProviderStub(object):
         '/pulumirpc.ResourceProvider/Invoke',
         request_serializer=provider__pb2.InvokeRequest.SerializeToString,
         response_deserializer=provider__pb2.InvokeResponse.FromString,
+        )
+    self.StreamInvoke = channel.unary_stream(
+        '/pulumirpc.ResourceProvider/StreamInvoke',
+        request_serializer=provider__pb2.InvokeRequest.SerializeToString,
+        response_deserializer=provider__pb2.InvokeResponse.FromString,
+        )
+    self.Call = channel.unary_unary(
+        '/pulumirpc.ResourceProvider/Call',
+        request_serializer=provider__pb2.CallRequest.SerializeToString,
+        response_deserializer=provider__pb2.CallResponse.FromString,
         )
     self.Check = channel.unary_unary(
         '/pulumirpc.ResourceProvider/Check',
@@ -67,6 +82,11 @@ class ResourceProviderStub(object):
         request_serializer=provider__pb2.DeleteRequest.SerializeToString,
         response_deserializer=google_dot_protobuf_dot_empty__pb2.Empty.FromString,
         )
+    self.Construct = channel.unary_unary(
+        '/pulumirpc.ResourceProvider/Construct',
+        request_serializer=provider__pb2.ConstructRequest.SerializeToString,
+        response_deserializer=provider__pb2.ConstructResponse.FromString,
+        )
     self.Cancel = channel.unary_unary(
         '/pulumirpc.ResourceProvider/Cancel',
         request_serializer=google_dot_protobuf_dot_empty__pb2.Empty.SerializeToString,
@@ -83,6 +103,13 @@ class ResourceProviderServicer(object):
   """ResourceProvider is a service that understands how to create, read, update, or delete resources for types defined
   within a single package.  It is driven by the overall planning engine in response to resource diffs.
   """
+
+  def GetSchema(self, request, context):
+    """GetSchema fetches the schema for this resource provider.
+    """
+    context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+    context.set_details('Method not implemented!')
+    raise NotImplementedError('Method not implemented!')
 
   def CheckConfig(self, request, context):
     """CheckConfig validates the configuration for this resource provider.
@@ -112,6 +139,21 @@ class ResourceProviderServicer(object):
     context.set_details('Method not implemented!')
     raise NotImplementedError('Method not implemented!')
 
+  def StreamInvoke(self, request, context):
+    """StreamInvoke dynamically executes a built-in function in the provider, which returns a stream
+    of responses.
+    """
+    context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+    context.set_details('Method not implemented!')
+    raise NotImplementedError('Method not implemented!')
+
+  def Call(self, request, context):
+    """Call dynamically executes a method in the provider associated with a component resource.
+    """
+    context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+    context.set_details('Method not implemented!')
+    raise NotImplementedError('Method not implemented!')
+
   def Check(self, request, context):
     """Check validates that the given property bag is valid for a resource of the given type and returns the inputs
     that should be passed to successive calls to Diff, Create, or Update for this resource. As a rule, the provider
@@ -132,7 +174,7 @@ class ResourceProviderServicer(object):
 
   def Create(self, request, context):
     """Create allocates a new instance of the provided resource and returns its unique ID afterwards.  (The input ID
-    must be blank.)  If this call fails, the resource must not have been created (i.e., it is "transacational").
+    must be blank.)  If this call fails, the resource must not have been created (i.e., it is "transactional").
     """
     context.set_code(grpc.StatusCode.UNIMPLEMENTED)
     context.set_details('Method not implemented!')
@@ -160,6 +202,13 @@ class ResourceProviderServicer(object):
     context.set_details('Method not implemented!')
     raise NotImplementedError('Method not implemented!')
 
+  def Construct(self, request, context):
+    """Construct creates a new instance of the provided component resource and returns its state.
+    """
+    context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+    context.set_details('Method not implemented!')
+    raise NotImplementedError('Method not implemented!')
+
   def Cancel(self, request, context):
     """Cancel signals the provider to abort all outstanding resource operations.
     """
@@ -177,6 +226,11 @@ class ResourceProviderServicer(object):
 
 def add_ResourceProviderServicer_to_server(servicer, server):
   rpc_method_handlers = {
+      'GetSchema': grpc.unary_unary_rpc_method_handler(
+          servicer.GetSchema,
+          request_deserializer=provider__pb2.GetSchemaRequest.FromString,
+          response_serializer=provider__pb2.GetSchemaResponse.SerializeToString,
+      ),
       'CheckConfig': grpc.unary_unary_rpc_method_handler(
           servicer.CheckConfig,
           request_deserializer=provider__pb2.CheckRequest.FromString,
@@ -196,6 +250,16 @@ def add_ResourceProviderServicer_to_server(servicer, server):
           servicer.Invoke,
           request_deserializer=provider__pb2.InvokeRequest.FromString,
           response_serializer=provider__pb2.InvokeResponse.SerializeToString,
+      ),
+      'StreamInvoke': grpc.unary_stream_rpc_method_handler(
+          servicer.StreamInvoke,
+          request_deserializer=provider__pb2.InvokeRequest.FromString,
+          response_serializer=provider__pb2.InvokeResponse.SerializeToString,
+      ),
+      'Call': grpc.unary_unary_rpc_method_handler(
+          servicer.Call,
+          request_deserializer=provider__pb2.CallRequest.FromString,
+          response_serializer=provider__pb2.CallResponse.SerializeToString,
       ),
       'Check': grpc.unary_unary_rpc_method_handler(
           servicer.Check,
@@ -226,6 +290,11 @@ def add_ResourceProviderServicer_to_server(servicer, server):
           servicer.Delete,
           request_deserializer=provider__pb2.DeleteRequest.FromString,
           response_serializer=google_dot_protobuf_dot_empty__pb2.Empty.SerializeToString,
+      ),
+      'Construct': grpc.unary_unary_rpc_method_handler(
+          servicer.Construct,
+          request_deserializer=provider__pb2.ConstructRequest.FromString,
+          response_serializer=provider__pb2.ConstructResponse.SerializeToString,
       ),
       'Cancel': grpc.unary_unary_rpc_method_handler(
           servicer.Cancel,

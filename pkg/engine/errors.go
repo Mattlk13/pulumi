@@ -17,7 +17,7 @@ package engine
 import (
 	"fmt"
 
-	"github.com/pulumi/pulumi/pkg/resource/config"
+	"github.com/pulumi/pulumi/sdk/v3/go/common/resource/config"
 )
 
 //

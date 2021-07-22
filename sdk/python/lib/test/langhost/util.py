@@ -33,6 +33,9 @@ from google.protobuf import empty_pb2, struct_pb2
 # test output. Just turn it off.
 logging.disable(level=logging.CRITICAL)
 
+# _MAX_RPC_MESSAGE_SIZE raises the gRPC Max Message size from `4194304` (4mb) to `419430400` (400mb)
+_MAX_RPC_MESSAGE_SIZE = 1024 * 1024 * 400
+_GRPC_CHANNEL_OPTIONS = [('grpc.max_receive_message_length', _MAX_RPC_MESSAGE_SIZE)]
 
 class LanghostMockResourceMonitor(proto.ResourceMonitorServicer):
     """
@@ -95,16 +98,17 @@ class LanghostMockResourceMonitor(proto.ResourceMonitorServicer):
         ignore_changes = sorted(list(request.ignoreChanges))
         version = request.version
         import_ = request.importId
+        replace_on_changes = sorted(list(request.replaceOnChanges))
 
         property_dependencies = {}
         for key, value in request.propertyDependencies.items():
             property_dependencies[key] = sorted(list(value.urns))
 
-        outs = {}
         if type_ != "pulumi:pulumi:Stack":
-            rrsig = signature(self.langhost_test.register_resource)
-            args = [context, self.dryrun, type_, name, props, deps, parent, custom, protect, provider, property_dependencies, delete_before_replace, ignore_changes, version, import_]
-            outs = self.langhost_test.register_resource(*args[0:len(rrsig.parameters)])
+            outs = self.langhost_test.register_resource(
+                context, self.dryrun, type_, name, props, deps, parent, custom, protect, provider,
+                property_dependencies, delete_before_replace, ignore_changes, version, import_, replace_on_changes,
+            )
             if outs.get("urn"):
                 urn = outs["urn"]
                 self.registrations[urn] = {
@@ -213,7 +217,7 @@ class LanghostTest(unittest.TestCase):
             langhost = self._create_language_host(monitor.port)
 
             # Run the program with the langhost we just launched.
-            with grpc.insecure_channel("localhost:%d" % langhost.port) as channel:
+            with grpc.insecure_channel("localhost:%d" % langhost.port, options=_GRPC_CHANNEL_OPTIONS) as channel:
                 grpc.channel_ready_future(channel).result()
                 stub = language_pb2_grpc.LanguageRuntimeStub(channel)
                 result = self._run_program(stub, monitor, project, stack,
@@ -243,7 +247,7 @@ class LanghostTest(unittest.TestCase):
 
             monitor.server.stop(0)
 
-    def invoke(self, _ctx, _token, _args, _provider):
+    def invoke(self, _ctx, token, args, provider, _version):
         """
         Method corresponding to the `Invoke` resource monitor RPC call.
         Override for custom behavior or assertions.
@@ -253,7 +257,7 @@ class LanghostTest(unittest.TestCase):
         """
         return ([], {})
 
-    def read_resource(self, _ctx, _type, _name, _id, _parent, _state):
+    def read_resource(self, ctx, ty, name, _id, parent, state, dependencies, provider, version):
         """
         Method corresponding to the `ReadResource` resource monitor RPC call.
         Override for custom behavior or assertions.
@@ -262,8 +266,9 @@ class LanghostTest(unittest.TestCase):
         """
         return {}
 
-    def register_resource(self, _ctx, _dry_run, _type, _name, _resource,
-                          _dependencies, _parent, _custom, _provider, _property_deps, _delete_before_replace, _import):
+    def register_resource(self, _ctx, _dry_run, ty, name, _resource, _dependencies, _parent, _custom, protect,
+                          _provider, _property_deps, _delete_before_replace, _ignore_changes, _version, _import,
+                          _replace_on_changes):
         """
         Method corresponding to the `RegisterResource` resource monitor RPC call.
         Override for custom behavior or assertions.
@@ -297,7 +302,7 @@ class LanghostTest(unittest.TestCase):
     def _create_mock_resource_monitor(self, dryrun):
         monitor = LanghostMockResourceMonitor(self, dryrun)
         engine = MockEngine()
-        server = grpc.server(futures.ThreadPoolExecutor(max_workers=4))
+        server = grpc.server(futures.ThreadPoolExecutor(max_workers=4), options=_GRPC_CHANNEL_OPTIONS)
 
         resource_pb2_grpc.add_ResourceMonitorServicer_to_server(monitor, server)
         engine_pb2_grpc.add_EngineServicer_to_server(engine, server)

@@ -130,9 +130,11 @@ function throwOrPrintModuleLoadError(program: string, error: Error): void {
     return;
 }
 
+/** @internal */
 export function run(argv: minimist.ParsedArgs,
                     programStarted: () => void,
-                    reportLoggedError: (err: Error) => void) {
+                    reportLoggedError: (err: Error) => void,
+                    isErrorReported: (err: Error) => boolean) {
     // If there is a --pwd directive, switch directories.
     const pwd: string | undefined = argv["pwd"];
     if (pwd) {
@@ -173,22 +175,21 @@ export function run(argv: minimist.ParsedArgs,
     process.argv = [ process.argv[0], process.argv[1], ...programArgs ];
 
     // Set up the process uncaught exception, unhandled rejection, and program exit handlers.
-    const errorSet = new Set<Error>();
-
     const uncaughtHandler = (err: Error) => {
         // In node, if you throw an error in a chained promise, but the exception is not finally
         // handled, then you can end up getting an unhandledRejection for each exception/promise
         // pair.  Because the exception is the same through all of these, we keep track of it and
         // only report it once so the user doesn't get N messages for the same thing.
-        if (errorSet.has(err)) {
+        if (isErrorReported(err)) {
             return;
         }
 
-        errorSet.add(err);
-
         // Default message should be to include the full stack (which includes the message), or
         // fallback to just the message if we can't get the stack.
-        const defaultMessage = err.stack || err.message;
+        //
+        // If both the stack and message are empty, then just stringify the err object itself. This
+        // is also necessary as users can throw arbitrary things in JS (including non-Errors).
+        const defaultMessage = err.stack || err.message || ("" + err);
 
         // First, log the error.
         if (RunError.isInstance(err)) {
@@ -210,13 +211,14 @@ ${defaultMessage}`);
     };
 
     process.on("uncaughtException", uncaughtHandler);
+    // @ts-ignore 'unhandledRejection' will almost always invoke uncaughtHandler with an Error. so
+    // just suppress the TS strictness here.
     process.on("unhandledRejection", uncaughtHandler);
     process.on("exit", runtime.disconnectSync);
 
     programStarted();
 
-    // Construct a `Stack` resource to represent the outputs of the program.
-    return runtime.runInPulumiStack(() => {
+    const runProgram = async () => {
         // We run the program inside this context so that it adopts all resources.
         //
         // IDEA: This will miss any resources created on other turns of the event loop.  I think that's a fundamental
@@ -225,7 +227,17 @@ ${defaultMessage}`);
         // Now go ahead and execute the code. The process will remain alive until the message loop empties.
         log.debug(`Running program '${program}' in pwd '${process.cwd()}' w/ args: ${programArgs}`);
         try {
-            return require(program);
+            // Execute the module and capture any module outputs it exported. If the exported value
+            // was itself a Function, then just execute it.  This allows for exported top level
+            // async functions that pulumi programs can live in.  Finally, await the value we get
+            // back.  That way, if it is async and throws an exception, we properly capture it here
+            // and handle it.
+            const reqResult = require(program);
+            const invokeResult = reqResult instanceof Function
+                ? reqResult()
+                : reqResult;
+
+            return await invokeResult;
         } catch (e) {
             // User JavaScript can throw anything, so if it's not an Error it's definitely
             // not something we want to catch up here.
@@ -241,5 +253,8 @@ ${defaultMessage}`);
 
             throw e;
         }
-    });
+    };
+
+    // Construct a `Stack` resource to represent the outputs of the program.
+    return runtime.runInPulumiStack(runProgram);
 }

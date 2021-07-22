@@ -101,11 +101,18 @@ ifeq ($(PULUMI_ROOT),)
 	PULUMI_ROOT:=/opt/pulumi
 endif
 
+# Use Python 3 explicitly vs expecting that `python` will resolve to a python 3
+# runtime.
+PYTHON ?= python3
+PIP ?= pip3
+
 PULUMI_BIN          := $(PULUMI_ROOT)/bin
 PULUMI_NODE_MODULES := $(PULUMI_ROOT)/node_modules
+PULUMI_NUGET        := $(PULUMI_ROOT)/nuget
 
-GO_TEST_FAST = PATH="$(PULUMI_BIN):$(PATH)" go test -short -count=1 -cover -timeout 1h -parallel ${TESTPARALLELISM}
-GO_TEST = PATH="$(PULUMI_BIN):$(PATH)" go test -count=1 -cover -timeout 1h -parallel ${TESTPARALLELISM}
+GO_TEST_FAST = PATH="$(PULUMI_BIN):$(PATH)" go test -short -count=1 -cover -tags=all -timeout 1h -parallel ${TESTPARALLELISM}
+GO_TEST = PATH="$(PULUMI_BIN):$(PATH)" go test -count=1 -cover -timeout 1h -tags=all -parallel ${TESTPARALLELISM}
+GOPROXY = 'https://proxy.golang.org'
 
 .PHONY: default all ensure only_build only_test build lint install test_all core
 
@@ -120,8 +127,11 @@ only_test:: $(SUB_PROJECTS:%=%_only_test)
 only_test_fast:: $(SUB_PROJECTS:%=%_only_test_fast)
 default:: $(SUB_PROJECTS:%=%_default)
 all:: $(SUB_PROJECTS:%=%_all)
+install_all:: $(SUB_PROJECTS:%=%_install_all)
+test_all:: $(SUB_PROJECTS:%=%_test_all)
 ensure:: $(SUB_PROJECTS:%=%_ensure)
 dist:: $(SUB_PROJECTS:%=%_dist)
+brew:: $(SUB_PROJECTS:%=%_brew)
 endif
 
 # `core` is like `default` except it does not build sub projects.
@@ -145,10 +155,7 @@ all:: build install lint test_all
 
 ensure::
 	$(call STEP_MESSAGE)
-	@if [ -e 'Gopkg.toml' ]; then echo "dep ensure -v"; dep ensure -v; \
-		elif [ -e 'go.mod' ]; then echo "GO111MODULE=on go mod vendor"; GO111MODULE=on go mod vendor; fi
 	@if [ -e 'package.json' ]; then echo "yarn install"; yarn install; fi
-
 build::
 	$(call STEP_MESSAGE)
 
@@ -162,8 +169,12 @@ install::
 	$(call STEP_MESSAGE)
 	@mkdir -p $(PULUMI_BIN)
 	@mkdir -p $(PULUMI_NODE_MODULES)
+	@mkdir -p $(PULUMI_NUGET)
 
 dist::
+	$(call STEP_MESSAGE)
+
+brew::
 	$(call STEP_MESSAGE)
 
 test_all::
@@ -199,10 +210,14 @@ $(SUB_PROJECTS:%=%_ensure):
 	@$(MAKE) -C ./$(@:%_ensure=%) ensure
 $(SUB_PROJECTS:%=%_build):
 	@$(MAKE) -C ./$(@:%_build=%) build
+$(SUB_PROJECTS:%=%_install_all):
+	@$(MAKE) -C ./$(@:%_install_all=%) install
 $(SUB_PROJECTS:%=%_lint):
 	@$(MAKE) -C ./$(@:%_lint=%) lint
 $(SUB_PROJECTS:%=%_test_fast):
 	@$(MAKE) -C ./$(@:%_test_fast=%) test_fast
+$(SUB_PROJECTS:%=%_test_all):
+	@$(MAKE) -C ./$(@:%_test_all=%) test_all
 $(SUB_PROJECTS:%=%_install):
 	@$(MAKE) -C ./$(@:%_install=%) install
 $(SUB_PROJECTS:%=%_only_build):
@@ -213,6 +228,8 @@ $(SUB_PROJECTS:%=%_only_test_fast):
 	@$(MAKE) -C ./$(@:%_only_test_fast=%) only_test_fast
 $(SUB_PROJECTS:%=%_dist):
 	@$(MAKE) -C ./$(@:%_dist=%) dist
+$(SUB_PROJECTS:%=%_brew):
+	@$(MAKE) -C ./$(@:%_brew=%) brew
 endif
 
 # As a convinece, we provide a format target that folks can build to

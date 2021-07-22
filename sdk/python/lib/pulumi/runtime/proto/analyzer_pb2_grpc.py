@@ -24,6 +24,11 @@ class AnalyzerStub(object):
         request_serializer=analyzer__pb2.AnalyzeRequest.SerializeToString,
         response_deserializer=analyzer__pb2.AnalyzeResponse.FromString,
         )
+    self.AnalyzeStack = channel.unary_unary(
+        '/pulumirpc.Analyzer/AnalyzeStack',
+        request_serializer=analyzer__pb2.AnalyzeStackRequest.SerializeToString,
+        response_deserializer=analyzer__pb2.AnalyzeResponse.FromString,
+        )
     self.GetAnalyzerInfo = channel.unary_unary(
         '/pulumirpc.Analyzer/GetAnalyzerInfo',
         request_serializer=google_dot_protobuf_dot_empty__pb2.Empty.SerializeToString,
@@ -33,6 +38,11 @@ class AnalyzerStub(object):
         '/pulumirpc.Analyzer/GetPluginInfo',
         request_serializer=google_dot_protobuf_dot_empty__pb2.Empty.SerializeToString,
         response_deserializer=plugin__pb2.PluginInfo.FromString,
+        )
+    self.Configure = channel.unary_unary(
+        '/pulumirpc.Analyzer/Configure',
+        request_serializer=analyzer__pb2.ConfigureAnalyzerRequest.SerializeToString,
+        response_deserializer=google_dot_protobuf_dot_empty__pb2.Empty.FromString,
         )
 
 
@@ -45,6 +55,16 @@ class AnalyzerServicer(object):
 
   def Analyze(self, request, context):
     """Analyze analyzes a single resource object, and returns any errors that it finds.
+    Called with the "inputs" to the resource, before it is updated.
+    """
+    context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+    context.set_details('Method not implemented!')
+    raise NotImplementedError('Method not implemented!')
+
+  def AnalyzeStack(self, request, context):
+    """AnalyzeStack analyzes all resources within a stack, at the end of a successful
+    preview or update. The provided resources are the "outputs", after any mutations
+    have taken place.
     """
     context.set_code(grpc.StatusCode.UNIMPLEMENTED)
     context.set_details('Method not implemented!')
@@ -64,12 +84,24 @@ class AnalyzerServicer(object):
     context.set_details('Method not implemented!')
     raise NotImplementedError('Method not implemented!')
 
+  def Configure(self, request, context):
+    """Configure configures the analyzer, passing configuration properties for each policy.
+    """
+    context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+    context.set_details('Method not implemented!')
+    raise NotImplementedError('Method not implemented!')
+
 
 def add_AnalyzerServicer_to_server(servicer, server):
   rpc_method_handlers = {
       'Analyze': grpc.unary_unary_rpc_method_handler(
           servicer.Analyze,
           request_deserializer=analyzer__pb2.AnalyzeRequest.FromString,
+          response_serializer=analyzer__pb2.AnalyzeResponse.SerializeToString,
+      ),
+      'AnalyzeStack': grpc.unary_unary_rpc_method_handler(
+          servicer.AnalyzeStack,
+          request_deserializer=analyzer__pb2.AnalyzeStackRequest.FromString,
           response_serializer=analyzer__pb2.AnalyzeResponse.SerializeToString,
       ),
       'GetAnalyzerInfo': grpc.unary_unary_rpc_method_handler(
@@ -81,6 +113,11 @@ def add_AnalyzerServicer_to_server(servicer, server):
           servicer.GetPluginInfo,
           request_deserializer=google_dot_protobuf_dot_empty__pb2.Empty.FromString,
           response_serializer=plugin__pb2.PluginInfo.SerializeToString,
+      ),
+      'Configure': grpc.unary_unary_rpc_method_handler(
+          servicer.Configure,
+          request_deserializer=analyzer__pb2.ConfigureAnalyzerRequest.FromString,
+          response_serializer=google_dot_protobuf_dot_empty__pb2.Empty.SerializeToString,
       ),
   }
   generic_handler = grpc.method_handlers_generic_handler(

@@ -1,54 +1,77 @@
 PROJECT_NAME := Pulumi SDK
-SUB_PROJECTS := sdk/nodejs sdk/python sdk/go
+SUB_PROJECTS := sdk/dotnet sdk/nodejs sdk/python sdk/go
 include build/common.mk
 
-PROJECT         := github.com/pulumi/pulumi
-PROJECT_PKGS    := $(shell go list ./cmd/... ./pkg/... | grep -v /vendor/)
-EXTRA_TEST_PKGS := $(shell go list ./examples/ ./tests/... | grep -v /vendor/)
-VERSION         := $(shell scripts/get-version)
+
+PROJECT         := github.com/pulumi/pulumi/pkg/v3/cmd/pulumi
+PROJECT_PKGS    := $(shell cd ./pkg && go list ./... | grep -v /vendor/)
+TESTS_PKGS      := $(shell cd ./tests && go list -tags all ./... | grep -v tests/templates | grep -v /vendor/)
+VERSION         := $(shell pulumictl get version)
 
 TESTPARALLELISM := 10
+
+ensure::
+	$(call STEP_MESSAGE)
+	@echo "cd sdk && go mod download"; cd sdk && go mod download
+	@echo "cd pkg && go mod download"; cd pkg && go mod download
+	@echo "cd tests && go mod download"; cd tests && go mod download
 
 build-proto::
 	cd sdk/proto && ./generate.sh
 
-build::
-	go install -ldflags "-X github.com/pulumi/pulumi/pkg/version.Version=${VERSION}" ${PROJECT}
+.PHONY: generate
+generate::
+	$(call STEP_MESSAGE)
+	echo "Generate static assets bundle for docs generator"
+	cd pkg && go generate ./codegen/docs/gen.go
 
-install::
-	GOBIN=$(PULUMI_BIN) go install -ldflags "-X github.com/pulumi/pulumi/pkg/version.Version=${VERSION}" ${PROJECT}
+build:: generate
+	cd pkg && go install -ldflags "-X github.com/pulumi/pulumi/pkg/v3/version.Version=${VERSION}" ${PROJECT}
 
-dist::
-	go install -ldflags "-X github.com/pulumi/pulumi/pkg/version.Version=${VERSION}" ${PROJECT}
+build_debug:: generate
+	cd pkg && go install -gcflags="all=-N -l" -ldflags "-X github.com/pulumi/pulumi/pkg/v3/version.Version=${VERSION}" ${PROJECT}
+
+install:: generate
+	cd pkg && GOBIN=$(PULUMI_BIN) go install -ldflags "-X github.com/pulumi/pulumi/pkg/v3/version.Version=${VERSION}" ${PROJECT}
+
+install_all:: install
+
+dist:: build
+	cd pkg && go install -ldflags "-X github.com/pulumi/pulumi/pkg/v3/version.Version=${VERSION}" ${PROJECT}
+
+# NOTE: the brew target intentionally avoids the dependency on `build`, as it does not require the language SDKs.
+brew:: BREW_VERSION := $(shell scripts/get-version HEAD)
+brew::
+	cd pkg && go install -ldflags "-X github.com/pulumi/pulumi/pkg/v3/version.Version=${BREW_VERSION}" ${PROJECT}
 
 lint::
-	golangci-lint run
+	for DIR in "pkg" "sdk" "tests" ; do \
+		pushd $$DIR ; golangci-lint run -c ../.golangci.yml --timeout 5m ; popd ; \
+	done
 
-test_fast::
-	$(GO_TEST_FAST) ${PROJECT_PKGS}
+test_fast:: build
+	cd pkg && $(GO_TEST_FAST) ${PROJECT_PKGS}
 
-test_all::
-	$(GO_TEST) ${PROJECT_PKGS}
-	$(GO_TEST) -v -p=1 ${EXTRA_TEST_PKGS}
+test_build:: $(SUB_PROJECTS:%=%_install)
+	cd tests/testprovider && go build -o pulumi-resource-testprovider
+	cd tests/integration/construct_component/testcomponent && yarn install && yarn link @pulumi/pulumi && yarn run tsc
+	cd tests/integration/construct_component/testcomponent-go && go build -o pulumi-resource-testcomponent
+	cd tests/integration/construct_component_slow/testcomponent && yarn install && yarn link @pulumi/pulumi && yarn run tsc
+	cd tests/integration/construct_component_plain/testcomponent && yarn install && yarn link @pulumi/pulumi && yarn run tsc
+	cd tests/integration/construct_component_plain/testcomponent-go && go build -o pulumi-resource-testcomponent
+	cd tests/integration/construct_component_unknown/testcomponent && yarn install && yarn link @pulumi/pulumi && yarn run tsc
+	cd tests/integration/construct_component_unknown/testcomponent-go && go build -o pulumi-resource-testcomponent
+	cd tests/integration/component_provider_schema/testcomponent && yarn install && yarn link @pulumi/pulumi && yarn run tsc
+	cd tests/integration/component_provider_schema/testcomponent-go && go build -o pulumi-resource-testcomponent
+	cd tests/integration/construct_component_error_apply/testcomponent && yarn install && yarn link @pulumi/pulumi && yarn run tsc
+	cd tests/integration/construct_component_methods/testcomponent && yarn install && yarn link @pulumi/pulumi && yarn run tsc
+	cd tests/integration/construct_component_methods/testcomponent-go && go build -o pulumi-resource-testcomponent
 
-.PHONY: publish_tgz
-publish_tgz:
+test_all:: build test_build $(SUB_PROJECTS:%=%_install)
+	cd pkg && $(GO_TEST) ${PROJECT_PKGS}
+	cd tests && $(GO_TEST) -p=1 ${TESTS_PKGS}
+
+.PHONY: test_containers
+test_containers:
 	$(call STEP_MESSAGE)
-	./scripts/publish_tgz.sh
-
-.PHONY: publish_packages
-publish_packages:
-	$(call STEP_MESSAGE)
-	./scripts/publish_packages.sh
-
-.PHONY: coverage
-coverage:
-	$(call STEP_MESSAGE)
-	./scripts/gocover.sh
-
-# The travis_* targets are entrypoints for CI.
-.PHONY: travis_cron travis_push travis_pull_request travis_api
-travis_cron: all coverage
-travis_push: only_build publish_tgz only_test publish_packages
-travis_pull_request: all
-travis_api: all
+	./scripts/test-containers.sh ${VERSION}
